@@ -1,0 +1,7 @@
+# Copy to my_papers.yaml and replace these entries with your own papers.
+papers:
+  - title: Example published paper
+    doi: 10.0000/example
+    status: published
+  - title: Example draft
+    status: draft

@@ -1,0 +1,41 @@
+# Secrets and your own data. Never commit these.
+.env
+.env.*
+!.env.example
+data/
+
+# Personal inputs the README asks you to create.
+my_papers.yaml
+targets.yaml
+known_papers.txt
+/*.bib
+/*.bbl
+/*.aux
+/*.csv
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test and lint caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

@@ -1,0 +1,12 @@
+# Copy to targets.yaml, list the venues that matter in your field, then run:
+#   ariadne venue targets targets.yaml
+# These ranks replace CORE's for matching venues, in scores, filters and labels.
+# Ranks are A*, A, B or C. An acronym helps match names like "Proc. ... (ABC)".
+venues:
+  - name: Nature Communications
+    rank: A*
+  - name: Physical Review Applied
+    rank: A
+  - name: International Conference on Learning Representations
+    acronym: ICLR
+    rank: A*

@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AriadneSearch</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="data:,">
+    <script src="vendor/force-graph.min.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>AriadneSearch</h1>
+
+      <label class="project-picker">
+        <span class="visually-hidden">Project</span>
+        <select id="project-select"></select>
+      </label>
+
+      <form id="project-form" class="inline-form" hidden>
+        <label>
+          <span class="visually-hidden">Project name</span>
+          <input id="project-name" type="text" placeholder="Project name" autocomplete="off">
+        </label>
+        <button type="submit">Create project</button>
+        <button id="project-cancel" type="button" class="quiet">Cancel</button>
+      </form>
+
+      <form id="seed-form" class="inline-form grow">
+        <label class="grow">
+          <span class="visually-hidden">DOI, arXiv ID or exact title</span>
+          <input id="seed-input" type="text" placeholder="DOI, arXiv ID or exact title" autocomplete="off">
+        </label>
+        <button type="submit">Add seed</button>
+      </form>
+
+      <button id="expand-button" type="button" class="primary" title="Add the best neighbours of newly added papers, then redraw the graph">Update graph</button>
+      <button id="update-button" type="button" title="Fetch papers citing your accepted papers, published since the last run">Check new papers</button>
+      <a id="export-link" class="button-link" download="ariadnesearch.bib">Export BibTeX</a>
+    </header>
+
+    <p id="status" class="status" role="status"></p>
+
+    <main class="workspace">
+      <section class="suggestions" aria-labelledby="suggestions-heading">
+        <div class="panel-head">
+          <h2 id="suggestions-heading">Suggestions</h2>
+          <span id="suggestion-count" class="muted"></span>
+        </div>
+
+        <div class="list-switch" role="group" aria-label="Papers shown">
+          <button id="list-suggestions" type="button" aria-pressed="true">Suggestions</button>
+          <button id="list-added" type="button" aria-pressed="false">Added papers</button>
+          <button id="list-recent" type="button" aria-pressed="false" title="Recent papers, best first">State of the art</button>
+          <button id="list-authors" type="button" aria-pressed="false" title="Authors who appear on several papers">Authors</button>
+        </div>
+
+        <label id="recent-filter" class="rank-filter" hidden>
+          Published
+          <select id="recent-since"></select>
+        </label>
+
+        <div id="filters" class="filters">
+          <label><input id="hide-cited" type="checkbox"> Hide papers I've cited</label>
+          <label><input id="hide-library" type="checkbox"> Hide my library</label>
+          <label class="rank-filter">
+            Minimum CORE rank
+            <select id="min-rank">
+              <option value="">Any</option>
+              <option value="A*">A*</option>
+              <option value="A">A</option>
+              <option value="B">B</option>
+              <option value="C">C</option>
+            </select>
+          </label>
+          <label class="rank-filter">
+            Minimum journal impact
+            <select id="min-impact" title="OpenAlex 2-year mean citedness of the journal">
+              <option value="">Any</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="5">5</option>
+              <option value="10">10</option>
+            </select>
+          </label>
+          <label class="rank-filter">
+            Sort by
+            <select id="sort-by">
+              <option value="relevance">Relevance</option>
+              <option value="impact">Journal impact</option>
+              <option value="citations">Citations</option>
+              <option value="newest">Newest</option>
+            </select>
+          </label>
+          <p id="rank-note" class="muted" hidden>Import a CORE list to filter by rank.</p>
+        </div>
+
+        <details class="drawer">
+          <summary>Add papers from a venue</summary>
+          <form id="venue-form" class="stack">
+            <label>Venue name or acronym
+              <input id="venue-name" type="text" autocomplete="off">
+            </label>
+            <label>Earliest year
+              <input id="venue-since" type="number" min="1900" max="2100" required>
+            </label>
+            <button type="submit">Find venue</button>
+          </form>
+          <ul id="venue-results" class="plain-list"></ul>
+        </details>
+
+        <details id="targets-drawer" class="drawer">
+          <summary>Target venues</summary>
+          <p class="muted">Venues you rank yourself. These replace CORE's rank wherever they match.</p>
+          <ul id="target-list" class="plain-list"></ul>
+          <form id="target-form" class="stack">
+            <label>Venue name
+              <input id="target-name" type="text" autocomplete="off" required>
+            </label>
+            <label>Acronym, optional
+              <input id="target-acronym" type="text" autocomplete="off">
+            </label>
+            <label>Rank
+              <select id="target-rank">
+                <option value="A*">A*</option>
+                <option value="A">A</option>
+                <option value="B">B</option>
+                <option value="C">C</option>
+              </select>
+            </label>
+            <button type="submit">Add target venue</button>
+          </form>
+        </details>
+
+        <details id="weights-drawer" class="drawer">
+          <summary>Ranking weights</summary>
+          <p id="weights-text" class="muted"></p>
+          <button id="tune-button" type="button">Fit to my seed papers</button>
+          <p class="muted">Hides some of your seeds, grows a graph from the rest three times,
+            and keeps the weights that find the hidden ones. It can take several minutes.</p>
+        </details>
+
+        <details class="drawer">
+          <summary>Search IEEE Xplore</summary>
+          <form id="ieee-form" class="stack">
+            <label>Search terms
+              <input id="ieee-query" type="text" autocomplete="off">
+            </label>
+            <button type="submit">Search IEEE</button>
+          </form>
+          <ul id="ieee-results" class="plain-list"></ul>
+        </details>
+
+        <ol id="frontier-list" class="paper-list"></ol>
+        <p id="frontier-empty" class="empty"></p>
+
+        <p class="shortcuts">
+          <kbd>j</kbd> <kbd>k</kbd> move, <kbd>a</kbd> accept, <kbd>r</kbd> reject,
+          <kbd>m</kbd> mark read
+        </p>
+      </section>
+
+      <section class="pad" aria-label="Citation graph">
+        <div id="graph" class="pad-canvas"></div>
+        <section id="graph-legend" class="graph-legend" aria-label="Colour key" hidden>
+          <details open>
+            <summary id="legend-title">Colour key</summary>
+            <ul id="legend-items"></ul>
+          </details>
+        </section>
+        <p id="pad-empty" class="pad-empty"></p>
+
+        <div class="view-switch" role="group" aria-label="Graph view">
+          <button id="view-map" type="button" aria-pressed="true">Map</button>
+          <button id="view-timeline" type="button" aria-pressed="false">Timeline</button>
+          <button id="view-fit" type="button">Fit</button>
+          <div class="graph-search">
+            <label>
+              <span class="visually-hidden">Find a paper by title, author, year or DOI</span>
+              <input id="graph-search" type="search" placeholder="Find a paper  ( / )" autocomplete="off"
+                role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list">
+            </label>
+            <ul id="search-results" class="search-results" role="listbox" hidden></ul>
+          </div>
+          <label class="size-picker">
+            <span class="visually-hidden">Node colour</span>
+            <select id="colour-by" title="What node colour shows">
+              <option value="state">Colour: paper state</option>
+              <option value="topic">Colour: topic</option>
+              <option value="subfield">Colour: research area</option>
+            </select>
+          </label>
+          <label class="size-picker">
+            <span class="visually-hidden">Node size</span>
+            <select id="size-by" title="What node size shows">
+              <option value="percentile">Size: importance in its field</option>
+              <option value="citations">Size: citations</option>
+              <option value="project">Size: cited in this project</option>
+              <option value="relevance">Size: relevance to you</option>
+            </select>
+          </label>
+        </div>
+
+        <aside class="title-block" aria-label="Project summary and legend">
+          <div class="tb-cell tb-project">
+            <span class="tb-label">Project</span>
+            <strong id="tb-project">None</strong>
+          </div>
+          <div class="tb-cell">
+            <span class="tb-label">Seeds</span>
+            <strong id="tb-seeds">0</strong>
+          </div>
+          <div class="tb-cell">
+            <span class="tb-label">Accepted</span>
+            <strong id="tb-accepted">0</strong>
+          </div>
+          <div id="tb-frontier-cell" class="tb-cell">
+            <span class="tb-label">To review</span>
+            <strong id="tb-frontier">0</strong>
+          </div>
+          <div class="tb-cell tb-wide">
+            <span class="tb-label">OpenAlex today</span>
+            <strong id="tb-openalex">$0.0000</strong>
+          </div>
+          <div class="tb-cell tb-wide">
+            <span class="tb-label">IEEE today</span>
+            <strong id="tb-ieee">0</strong>
+          </div>
+          <ul class="tb-legend">
+            <li><svg viewBox="0 0 14 14" aria-hidden="true"><path class="mark-ink" d="M7 1 13 7 7 13 1 7Z"/></svg>Seed</li>
+            <li><svg viewBox="0 0 14 14" aria-hidden="true"><circle class="mark-ink" cx="7" cy="7" r="5"/></svg>Accepted</li>
+            <li><svg viewBox="0 0 14 14" aria-hidden="true"><circle class="mark-read" cx="7" cy="7" r="5"/></svg>Read</li>
+            <li id="legend-review"><svg viewBox="0 0 14 14" aria-hidden="true"><circle class="mark-pencil" cx="7" cy="7" r="5"/></svg>To review</li>
+            <li><svg viewBox="0 0 14 14" aria-hidden="true"><circle class="mark-red" cx="7" cy="7" r="5"/></svg>Cited by me</li>
+          </ul>
+        </aside>
+      </section>
+
+      <section class="details" aria-labelledby="details-heading">
+        <h2 id="details-heading" class="visually-hidden">Paper details</h2>
+        <div id="paper-details">
+          <p class="empty">Select a paper to read its abstract and see why it was suggested.</p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
