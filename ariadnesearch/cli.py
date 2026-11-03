@@ -13,8 +13,23 @@ from datetime import date
 from pathlib import Path
 
 from ariadnesearch import mine, references, tune, views
+from ariadnesearch.author import (
+    WORKS_CAP,
+    AuthorReport,
+    add_profiles,
+    author_view,
+    create_author_project,
+    find_authors,
+    update_author,
+)
 from ariadnesearch.config import Config, load_config
-from ariadnesearch.db import cache_path, create_project, get_project_id, init_db
+from ariadnesearch.db import (
+    cache_path,
+    create_project,
+    get_project_id,
+    init_db,
+    is_author_project,
+)
 from ariadnesearch.prune import prune
 from ariadnesearch.errors import AriadneError, NotFound
 from ariadnesearch.expand import (
@@ -267,6 +282,9 @@ def cmd_citers(args: argparse.Namespace) -> int:
 def cmd_update(args: argparse.Namespace) -> int:
     with open_app() as app:
         project_id = get_project_id(app.conn, args.project)
+        if is_author_project(app.conn, project_id):
+            _print_author_report(update_author(app.conn, app.client, project_id))
+            return 0
         report = update_project(
             app.conn, app.client, project_id, args.since, args.cap, args.per_paper or None
         )
@@ -288,6 +306,84 @@ def cmd_update(args: argparse.Namespace) -> int:
         summary = summaries.get(item.work_id) or {}
         title = (summary.get("title") or "Untitled")[:78]
         print(f"{item.score:7.3f}  {item.work_id:>8}  {summary.get('year') or '':>4}  {title}")
+    return 0
+
+
+def _print_author_report(report: AuthorReport) -> None:
+    print(
+        f"{report.papers} of their papers in the project, {len(report.new_papers)} new. "
+        f"Described {report.described} papers they cite and added "
+        f"{report.inspirations} to review. Cost ${report.cost_usd:.4f}"
+    )
+    if report.capped:
+        print(f"OpenAlex lists {report.total} papers. The {WORKS_CAP} most cited were fetched.")
+
+
+def cmd_author_find(args: argparse.Namespace) -> int:
+    with open_app() as app:
+        profiles = find_authors(app.client, args.query)
+    if not profiles:
+        print("No authors found.")
+    for profile in profiles:
+        years = f"{profile.first_year}-{profile.last_year}" if profile.first_year else ""
+        print(
+            f"{profile.id:<12} {profile.works_count:>5} papers {profile.cited_by:>8} cited"
+            f"  h {profile.h_index or 0:<4} {years:<10} {profile.name}"
+        )
+        for line in (", ".join(profile.institutions[:2]), "; ".join(profile.topics)):
+            if line:
+                print(f"{'':13}{line}")
+    return 0
+
+
+def cmd_author_new(args: argparse.Namespace) -> int:
+    with open_app() as app:
+        project_id, report = create_author_project(
+            app.conn, app.client, args.author_ids, args.name
+        )
+        name = app.conn.execute(
+            "SELECT name FROM project WHERE id = ?", (project_id,)
+        ).fetchone()[0]
+    print(f"Created the author project {name}.")
+    _print_author_report(report)
+    return 0
+
+
+def cmd_author_add(args: argparse.Namespace) -> int:
+    with open_app() as app:
+        project_id = get_project_id(app.conn, args.project)
+        _print_author_report(add_profiles(app.conn, app.client, project_id, args.author_ids))
+    return 0
+
+
+def cmd_author_report(args: argparse.Namespace) -> int:
+    with open_app() as app:
+        view = author_view(app.conn, get_project_id(app.conn, args.project))
+    print(
+        f"{view['name']}: {view['papers']} papers, {view['first_year']}-{view['last_year']}, "
+        f"{view['citations']} citations, {view['self_links']} links between their own papers"
+    )
+    print("\nPapers per year")
+    for row in view["per_year"]:
+        print(f"  {row['year']}  {'#' * row['papers']:<20} {row['papers']:>3}")
+    print("\nPapers they cite most: how many of their papers cite it, and when")
+    for item in view["inspirations"][: args.k]:
+        span = f"{item['first_year']}-{item['last_year']}"
+        print(f"{item['count']:>4}  {span:<9}  {item['label']:<18} {item['title'][:60]}")
+    print("\nAuthors they cite most")
+    for person in view["inspiring_authors"][: args.k]:
+        note = ", also a co-author" if person["coauthor"] else ""
+        print(f"{person['papers']:>4}  {person['name']} ({person['works']} works{note})")
+    print("\nCo-authors")
+    for person in view["coauthors"][: args.k]:
+        print(f"{person['papers']:>4}  {person['first_year']}-{person['last_year']}  {person['name']}")
+    if view["claimed"]:
+        print(
+            "\nMissing from their OpenAlex profile, added because their papers cite them "
+            "and they list the author. Reject any that are someone else's with `decide`."
+        )
+        for item in view["claimed"]:
+            print(f"{item['id']:>8}  {item['label']:<18} {item['title'][:60]}")
     return 0
 
 
@@ -687,6 +783,28 @@ def build_parser() -> argparse.ArgumentParser:
     p = mine_commands.add_parser("zotero", help="import a Zotero BibTeX export")
     p.add_argument("bib", type=Path)
     p.set_defaults(handler=cmd_mine_zotero)
+
+    author_parser = commands.add_parser("author", help="study one researcher's papers")
+    author_commands = author_parser.add_subparsers(dest="author_command", required=True)
+
+    p = author_commands.add_parser("find", help="find an author's OpenAlex ID")
+    p.add_argument("query", help="a name, ORCID or OpenAlex author ID")
+    p.set_defaults(handler=cmd_author_find)
+
+    p = author_commands.add_parser("new", help="create an author project")
+    p.add_argument("author_ids", nargs="+", help="OpenAlex IDs of one person's profiles")
+    p.add_argument("--name", help="project name, default: the author's name")
+    p.set_defaults(handler=cmd_author_new)
+
+    p = author_commands.add_parser("add", help="follow another profile of the same person")
+    p.add_argument("project")
+    p.add_argument("author_ids", nargs="+")
+    p.set_defaults(handler=cmd_author_add)
+
+    p = author_commands.add_parser("report", help="show their output, inspirations and co-authors")
+    p.add_argument("project")
+    p.add_argument("-k", type=int, default=15, help="rows per list")
+    p.set_defaults(handler=cmd_author_report)
 
     venue_parser = commands.add_parser("venue", help="venue ranks and venue input")
     venue_commands = venue_parser.add_subparsers(dest="venue_command", required=True)

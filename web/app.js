@@ -6,6 +6,9 @@ const GRAPH_LIMIT = 200;
 const FRONTIER_SIZE = 50;
 const FIT_PADDING = 60;
 const NEW_PROJECT = "__new";
+const NEW_AUTHOR_PROJECT = "__author";
+const AUTHOR_GRAPH_EXTRA = 60; // papers they cite, drawn beside their own
+const AUTHOR_GRAPH_MAX = 900;
 const STORED_PROJECT = "ariadne.project";
 const STATE_NAMES = { seed: "Seed", accepted: "Accepted", read: "Read", rejected: "Rejected" };
 
@@ -37,6 +40,14 @@ const state = {
   searchResults: [],
   searchActive: -1,
   justAdded: [], // citing papers added from the details panel, drawn whatever their rank
+  defaultsFor: null, // the project whose list and view defaults were applied
+  author: null, // an author project's overview, from /author
+  authorGraph: false, // the graph on screen belongs to an author project
+  picker: { mode: "new", profiles: [], chosen: new Set() },
+  inspirationView: "papers", // or "authors"
+  inspirationSort: "count",
+  hideCoauthors: true,
+  lanes: [], // timeline rows, one per colour category
 };
 
 function el(tag, attrs = {}, ...children) {
@@ -77,11 +88,14 @@ async function api(path, body, method) {
   return data;
 }
 
+// Thrown when an answer arrives for a project that is no longer open.
+class Stale extends Error {}
+
 async function attempt(action) {
   try {
     return await action();
   } catch (error) {
-    say(error.message, true);
+    if (!(error instanceof Stale)) say(error.message, true);
     return undefined;
   }
 }
@@ -92,6 +106,15 @@ function plural(count, word) {
 
 function projectPath(suffix = "") {
   return `/api/projects/${state.projectId}${suffix}`;
+}
+
+// Read project data, dropping the answer if another project was opened meanwhile,
+// so a slow load cannot draw over the project now on screen.
+async function projectGet(suffix) {
+  const project = state.projectId;
+  const data = await api(projectPath(suffix));
+  if (state.projectId !== project) throw new Stale();
+  return data;
 }
 
 function storedProject() {
@@ -126,13 +149,67 @@ function currentProject() {
   return state.projects.find((project) => project.id === state.projectId);
 }
 
+function isAuthorProject() {
+  return currentProject()?.kind === "author";
+}
+
+function stateName(value) {
+  if (value === "seed" && isAuthorProject()) return "Their paper";
+  return STATE_NAMES[value];
+}
+
+const TOPIC_LISTS = ["suggestions", "added", "recent", "authors"];
+const AUTHOR_LISTS = ["overview", "added", "inspirations", "coauthors", "suggestions"];
+
+// An author project follows one person's papers, so some controls change name.
+function applyProjectKind() {
+  const author = isAuthorProject();
+  const lists = author ? AUTHOR_LISTS : TOPIC_LISTS;
+  for (const name of Object.keys(LIST_HEADINGS)) $(`list-${name}`).hidden = !lists.includes(name);
+  $("list-added").textContent = author ? "Their papers" : "Added papers";
+  $("list-suggestions").textContent = author ? "To review" : "Suggestions";
+  $("tb-seeds-label").textContent = author ? "Their papers" : "Seeds";
+  $("legend-seed").textContent = author ? "Their paper" : "Seed";
+  $("legend-own-link").hidden = !author;
+  for (const node of document.querySelectorAll(".topic-only")) node.hidden = author;
+  $("seed-input").placeholder = author
+    ? "Add a paper of theirs: DOI, arXiv ID or title"
+    : "DOI, arXiv ID or exact title";
+  $("seed-button").textContent = author ? "Add paper" : "Add seed";
+  $("size-by").querySelector('option[value="project"]').textContent = author
+    ? "Size: cited by their papers"
+    : "Size: cited in this project";
+  $("update-button").title = author
+    ? "Fetch their papers again, adding new ones"
+    : "Fetch papers citing your accepted papers, published since the last run";
+}
+
+// Each kind of project opens on its own list and view.
+function applyProjectDefaults() {
+  state.defaultsFor = state.projectId;
+  const author = isAuthorProject();
+  state.listMode = author ? "overview" : TOPIC_LISTS.includes(state.listMode) ? state.listMode : "suggestions";
+  state.view = author ? "timeline" : "map";
+  state.colourBy = author ? "topic" : "state";
+  // In an author project, size shows how often their papers cite a paper.
+  state.sizeBy = author ? "project" : "percentile";
+  state.categorySlots = new Map();
+  $("colour-by").value = state.colourBy;
+  $("size-by").value = state.sizeBy;
+  $("view-map").setAttribute("aria-pressed", String(state.view === "map"));
+  $("view-timeline").setAttribute("aria-pressed", String(state.view === "timeline"));
+  markListMode();
+  renderDetailsEmpty();
+}
+
 function renderProjects() {
   const select = $("project-select");
   select.replaceChildren(
     ...state.projects.map((project) =>
       el("option", { value: project.id }, project.name)
     ),
-    el("option", { value: NEW_PROJECT }, "New project")
+    el("option", { value: NEW_PROJECT }, "New project"),
+    el("option", { value: NEW_AUTHOR_PROJECT }, "New author project")
   );
   select.hidden = state.projects.length === 0;
   if (state.projectId) select.value = String(state.projectId);
@@ -156,6 +233,7 @@ function renderProjects() {
   $("expand-button").textContent = pending ? `Update graph (${pending} new)` : "Update graph";
   $("expand-button").disabled = !project;
   $("update-button").disabled = !project;
+  applyProjectKind();
 }
 
 async function loadProjects() {
@@ -172,6 +250,8 @@ async function loadProjects() {
 
 async function refresh() {
   await loadProjects();
+  if (state.defaultsFor !== state.projectId) applyProjectDefaults();
+  state.author = null; // fetched again by the list that needs it
   await Promise.all([loadHealth(), loadList(), loadGraph()]);
 }
 
@@ -208,7 +288,8 @@ function impactTag(journal) {
 
 function tagsFor(item) {
   const tags = [];
-  if (STATE_NAMES[item.state]) tags.push(el("span", { class: "tag" }, STATE_NAMES[item.state]));
+  const theirs = isAuthorProject() && item.state === "seed"; // the list already says so
+  if (stateName(item.state) && !theirs) tags.push(el("span", { class: "tag" }, stateName(item.state)));
   if (item.populated === false) tags.push(el("span", { class: "tag tag-explore" }, "Not in graph yet"));
   if (item.rank) tags.push(el("span", { class: "tag tag-rank" }, rankLabel(item.rank)));
   const impact = impactTag(item.journal);
@@ -252,14 +333,20 @@ function paperRow(item) {
 }
 
 function loadList() {
+  const panel = $("author-panel");
+  panel.hidden = !["overview", "inspirations"].includes(state.listMode);
+  if (panel.hidden) panel.replaceChildren();
   if (state.listMode === "added") return loadAdded();
   if (state.listMode === "authors") return loadAuthors();
+  if (state.listMode === "overview") return loadOverview();
+  if (state.listMode === "inspirations") return loadInspirations();
+  if (state.listMode === "coauthors") return loadCoauthors();
   return loadFrontier();
 }
 
 async function loadAuthors() {
   state.items = [];
-  const authors = state.projectId ? (await api(projectPath("/authors"))).items : [];
+  const authors = state.projectId ? (await projectGet("/authors")).items : [];
   const rows = authors.map((author) => {
     const open = state.authorOpen === author.name;
     const papers = open
@@ -295,6 +382,15 @@ async function loadAuthors() {
           .filter(Boolean)
           .join(" · ")
       ),
+      el(
+        "div",
+        { class: "row-actions" },
+        el(
+          "button",
+          { type: "button", title: "Start an author project for this person", onclick: () => openAuthorForm(author.name) },
+          "Study this author"
+        )
+      ),
       papers
     );
   });
@@ -311,7 +407,7 @@ function focusAuthor(author) {
 }
 
 async function loadAdded() {
-  state.items = state.projectId ? (await api(projectPath("/added"))).items : [];
+  state.items = state.projectId ? (await projectGet("/added")).items : [];
   $("frontier-list").replaceChildren(...state.items.map(paperRow));
   $("suggestion-count").textContent = state.items.length ? plural(state.items.length, "paper") : "";
   let message = "";
@@ -320,25 +416,473 @@ async function loadAdded() {
   $("frontier-empty").textContent = message;
 }
 
+/* Author projects: one person's papers, what they cite, and who they work with */
+
+async function authorData() {
+  if (!state.author) state.author = await projectGet("/author");
+  return state.author;
+}
+
+function yearSpan(first, last) {
+  if (!first) return "";
+  return first === last ? String(first) : `${first}–${last}`;
+}
+
+function linkList(papers, describe = (paper) => `${paper.label}: ${plain(paper.title)}`) {
+  return el(
+    "ul",
+    { class: "author-papers" },
+    ...papers.map((paper) =>
+      el(
+        "li",
+        {},
+        el("button", { type: "button", class: "link-button", onclick: () => selectPaper(paper.id) }, describe(paper))
+      )
+    )
+  );
+}
+
+function stat(label, value) {
+  return el("div", { class: "stat" }, el("span", { class: "tb-label" }, label), el("strong", {}, value));
+}
+
+// Papers per year as columns: one series, so the heading names it and there is
+// no key. Hover a column to read it, click to light that year's papers.
+function yearChart(perYear) {
+  const width = 300;
+  const height = 110;
+  const top = 14;
+  const base = height - 16;
+  const slot = width / Math.max(perYear.length, 1);
+  const bar = Math.max(1, Math.min(24, slot - 2)); // a 2px gap between columns
+  const peak = Math.max(1, ...perYear.map((row) => row.papers));
+  const readout = el("p", { class: "chart-readout muted" }, "Hover a year to read it. Click to light its papers.");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("class", "year-chart");
+  svg.setAttribute("role", "img");
+  const total = perYear.reduce((sum, row) => sum + row.papers, 0);
+  svg.setAttribute("aria-label", `Papers per year, ${total} in all`);
+  const make = (tag, attrs) => {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    svg.append(node);
+    return node;
+  };
+  make("line", { x1: 0, x2: width, y1: base + 0.5, y2: base + 0.5, class: "chart-base" });
+  const labelEvery = Math.ceil(perYear.length / 6);
+  const lastIndex = perYear.length - 1;
+  perYear.forEach((row, index) => {
+    const x = index * slot + (slot - bar) / 2;
+    const h = (row.papers / peak) * (base - top);
+    if (h > 0) {
+      const r = Math.min(4, bar / 2, h); // rounded at the data end, square at the baseline
+      make("path", {
+        class: "chart-bar",
+        d: `M${x},${base} V${base - h + r} Q${x},${base - h} ${x + r},${base - h} H${x + bar - r} Q${x + bar},${base - h} ${x + bar},${base - h + r} V${base} Z`,
+      });
+    }
+    if (row.papers === peak) {
+      make("text", { x: x + bar / 2, y: base - h - 3, class: "chart-label", "text-anchor": "middle" }).textContent = row.papers;
+    }
+    // Every few years, and always the last, unless it would crowd the one before.
+    if (index === lastIndex || (index % labelEvery === 0 && lastIndex - index >= labelEvery * 0.6)) {
+      make("text", { x: x + bar / 2, y: height - 3, class: "chart-label", "text-anchor": "middle" }).textContent = row.year;
+    }
+    const hit = make("rect", { x: index * slot, y: 0, width: slot, height: base, class: "chart-hit" });
+    hit.addEventListener("mouseenter", () => {
+      readout.textContent = `${row.year}: ${plural(row.papers, "paper")}, cited ${row.citations.toLocaleString()} times so far`;
+    });
+    hit.addEventListener("click", () => focusPapers((node) => node.year === row.year && node.state === "seed"));
+  });
+  return el("div", { class: "detail-block" }, el("h3", {}, "Papers per year"), svg, readout);
+}
+
+function focusPapers(test) {
+  const nodes = state.graph?.graphData().nodes || [];
+  state.highlight = new Set(nodes.filter(test).map((node) => node.id));
+  redraw();
+}
+
+async function notTheirs(workId, title) {
+  await api(projectPath("/decisions"), { work_id: workId, decision: "rejected" });
+  say(`Marked as someone else's: ${plain(title)}. It now counts as a paper they cite.`);
+  await refresh();
+}
+
+async function loadOverview() {
+  state.items = [];
+  $("frontier-list").replaceChildren();
+  $("suggestion-count").textContent = "";
+  $("frontier-empty").textContent = "";
+  const data = await authorData();
+  const main = data.profiles[0] || {};
+  const blocks = [
+    el("h3", { class: "author-name" }, data.name),
+    main.institutions?.length ? el("p", { class: "paper-meta" }, main.institutions.slice(0, 2).join(", ")) : null,
+    el(
+      "div",
+      { class: "stats" },
+      stat("Papers", data.papers.toLocaleString()),
+      stat("Years", yearSpan(data.first_year, data.last_year) || "Unknown"),
+      stat("Cited", data.citations.toLocaleString()),
+      stat("Self-citations", data.self_links.toLocaleString())
+    ),
+    el(
+      "p",
+      { class: "muted" },
+      "Self-citations are links from one of their papers to another. They are drawn dark on the graph, and Their papers shows them alone."
+    ),
+    data.per_year.length ? yearChart(data.per_year) : null,
+  ];
+  if (data.claimed.length) {
+    blocks.push(
+      el(
+        "div",
+        { class: "detail-block" },
+        el("h3", {}, "Added from their reference lists"),
+        el(
+          "p",
+          { class: "muted" },
+          `Their papers cite these, and they list ${data.name}, but the OpenAlex profile misses them. Mark any that belong to someone with the same name.`
+        ),
+        el(
+          "ul",
+          { class: "author-papers" },
+          ...data.claimed.map((paper) =>
+            el(
+              "li",
+              { class: "claimed-row" },
+              el("button", { type: "button", class: "link-button", onclick: () => selectPaper(paper.id) }, `${paper.label}: ${plain(paper.title)}`),
+              el("button", { type: "button", class: "small", onclick: () => attempt(() => notTheirs(paper.id, paper.title)) }, "Not theirs")
+            )
+          )
+        )
+      )
+    );
+  }
+  blocks.push(
+    el(
+      "div",
+      { class: "detail-block" },
+      el("h3", {}, data.profiles.length > 1 ? "OpenAlex profiles" : "OpenAlex profile"),
+      el(
+        "ul",
+        { class: "author-papers" },
+        ...data.profiles.map((profile) =>
+          el(
+            "li",
+            {},
+            el("a", { href: `https://openalex.org/${profile.id}`, target: "_blank", rel: "noreferrer" }, profile.id),
+            ` ${profile.name}, ${plural(profile.works_count, "paper")} listed`
+          )
+        )
+      ),
+      el(
+        "button",
+        { type: "button", onclick: () => openAuthorForm(data.name, "add") },
+        "Add another profile of this person"
+      )
+    )
+  );
+  $("author-panel").replaceChildren(...blocks.filter(Boolean));
+}
+
+const INSPIRATION_SORTS = {
+  count: ["Cited in most of their papers", (a, b) => b.count - a.count],
+  held: ["Cited over the most years", (a, b) => (b.last_year - b.first_year) - (a.last_year - a.first_year) || b.count - a.count],
+  newest: ["Most recently taken up", (a, b) => (b.first_year || 0) - (a.first_year || 0) || b.count - a.count],
+  oldest: ["Earliest taken up", (a, b) => (a.first_year || 9999) - (b.first_year || 9999) || b.count - a.count],
+};
+
+function inspirationControls() {
+  const toggle = el(
+    "div",
+    { class: "list-switch", role: "group", "aria-label": "Inspirations shown" },
+    ...[["papers", "Papers"], ["authors", "Authors"]].map(([value, label]) =>
+      el(
+        "button",
+        {
+          type: "button",
+          "aria-pressed": String(state.inspirationView === value),
+          onclick: () => {
+            state.inspirationView = value;
+            state.authorOpen = null;
+            attempt(loadInspirations);
+          },
+        },
+        label
+      )
+    )
+  );
+  let option;
+  if (state.inspirationView === "papers") {
+    const select = el(
+      "select",
+      { "aria-label": "Order" },
+      ...Object.entries(INSPIRATION_SORTS).map(([value, [label]]) => el("option", { value }, label))
+    );
+    select.value = state.inspirationSort;
+    select.addEventListener("change", () => {
+      state.inspirationSort = select.value;
+      attempt(loadInspirations);
+    });
+    option = el("label", { class: "rank-filter" }, "Order", select);
+  } else {
+    const box = el("input", { type: "checkbox", ...(state.hideCoauthors ? { checked: "" } : {}) });
+    box.addEventListener("change", () => {
+      state.hideCoauthors = box.checked;
+      attempt(loadInspirations);
+    });
+    option = el("label", {}, box, " Leave out their co-authors");
+  }
+  return [toggle, el("div", { class: "filters" }, option)];
+}
+
+function inspirationRow(item) {
+  return el(
+    "li",
+    {
+      class: "paper-row",
+      "data-id": item.id,
+      "aria-current": item.id === state.selectedId ? "true" : "false",
+      onclick: () => selectPaper(item.id),
+    },
+    el("button", { type: "button", class: "paper-title" }, plain(item.title)),
+    el(
+      "p",
+      { class: "paper-meta" },
+      `${item.label} · cited in ${item.count} of their papers, ${yearSpan(item.first_year, item.last_year)}`
+    ),
+    item.state && item.state !== "frontier" ? el("div", { class: "tags" }, el("span", { class: "tag" }, stateName(item.state))) : null,
+    item.state === "frontier"
+      ? el(
+          "div",
+          { class: "row-actions", onclick: (event) => event.stopPropagation() },
+          el("button", { type: "button", onclick: () => decide(item.id, "accepted") }, "Accept"),
+          el("button", { type: "button", onclick: () => decide(item.id, "rejected") }, "Reject")
+        )
+      : null
+  );
+}
+
+function personRow(person, meta, tags, papers) {
+  const open = state.authorOpen === person.name;
+  return el(
+    "li",
+    { class: "paper-row author-row", "aria-current": String(open) },
+    el(
+      "button",
+      {
+        type: "button",
+        class: "paper-title",
+        onclick: () => {
+          state.authorOpen = open ? null : person.name;
+          state.highlight = state.authorOpen ? new Set(person.work_ids) : null;
+          redraw();
+          attempt(loadList);
+        },
+      },
+      person.name
+    ),
+    el("p", { class: "paper-meta" }, meta),
+    tags.length ? el("div", { class: "tags" }, ...tags.map((tag) => el("span", { class: "tag" }, tag))) : null,
+    open ? linkList(papers) : null
+  );
+}
+
+function knownPapers(ids) {
+  const nodes = new Map((state.graph?.graphData().nodes || []).map((node) => [node.id, node]));
+  return ids.map((id) => nodes.get(id) || { id, label: `Paper ${id}`, title: "" });
+}
+
+async function loadInspirations() {
+  const data = await authorData();
+  $("author-panel").replaceChildren(...inspirationControls());
+  if (state.inspirationView === "papers") {
+    state.items = [...data.inspirations].sort(INSPIRATION_SORTS[state.inspirationSort][1]);
+    $("frontier-list").replaceChildren(...state.items.map(inspirationRow));
+    $("suggestion-count").textContent = state.items.length ? plural(state.items.length, "paper") : "";
+    $("frontier-empty").textContent = state.items.length ? "" : "OpenAlex lists no references for their papers.";
+    return;
+  }
+  state.items = [];
+  const people = data.inspiring_authors.filter((person) => !(state.hideCoauthors && person.coauthor));
+  $("frontier-list").replaceChildren(
+    ...people.map((person) =>
+      personRow(
+        person,
+        `cited in ${person.papers} of their papers, ${yearSpan(person.first_year, person.last_year)} · ${plural(person.works, "work")}`,
+        person.coauthor ? ["Also a co-author"] : [],
+        person.works_cited
+      )
+    )
+  );
+  $("suggestion-count").textContent = people.length ? plural(people.length, "author") : "";
+  $("frontier-empty").textContent = people.length ? "" : "No cited authors yet.";
+}
+
+async function loadCoauthors() {
+  const data = await authorData();
+  state.items = [];
+  $("frontier-list").replaceChildren(
+    ...data.coauthors.map((person) =>
+      personRow(
+        person,
+        `${plural(person.papers, "joint paper")}, ${yearSpan(person.first_year, person.last_year)}`,
+        [],
+        knownPapers(person.work_ids)
+      )
+    )
+  );
+  const count = data.coauthors.length;
+  $("suggestion-count").textContent = count ? `${count} ${count === 1 ? "person" : "people"}` : "";
+  $("frontier-empty").textContent = data.coauthors.length ? "" : "They have no co-authors in OpenAlex.";
+}
+
+/* Finding an author */
+
+function openAuthorForm(query = "", mode = "new") {
+  state.picker = { mode, profiles: [], chosen: new Set() };
+  $("project-form").hidden = true;
+  $("author-form").hidden = false;
+  $("author-query").value = query;
+  $("author-query").focus();
+  if (query) attempt(findAuthors);
+}
+
+function closeAuthorForm() {
+  $("author-form").hidden = true;
+  $("author-picker").hidden = true;
+  $("project-form").hidden = state.projects.length > 0;
+}
+
+async function findAuthors() {
+  const query = $("author-query").value.trim();
+  if (!query) {
+    say("Enter an author's name, ORCID or OpenAlex ID.", true);
+    return;
+  }
+  say(`Looking up ${query}...`);
+  const { authors } = await api("/api/authors/search", { query });
+  state.picker.profiles = authors;
+  state.picker.chosen = new Set(authors.length === 1 ? [authors[0].id] : []);
+  renderAuthorPicker();
+  await loadHealth();
+  say(authors.length ? "Tick the profiles that are this person." : `No author found for ${query}.`, !authors.length);
+}
+
+function renderAuthorPicker() {
+  const { profiles, chosen, mode } = state.picker;
+  const create = $("author-create");
+  const sync = () => {
+    create.disabled = chosen.size === 0;
+  };
+  $("author-results").replaceChildren(
+    ...profiles.map((profile) => {
+      const box = el("input", { type: "checkbox", ...(chosen.has(profile.id) ? { checked: "" } : {}) });
+      box.addEventListener("change", () => {
+        if (box.checked) chosen.add(profile.id);
+        else chosen.delete(profile.id);
+        sync();
+      });
+      const facts = [
+        profile.institutions.slice(0, 2).join(", "),
+        plural(profile.works_count, "paper"),
+        `cited ${profile.cited_by.toLocaleString()} times`,
+        profile.h_index != null ? `h-index ${profile.h_index}` : "",
+        yearSpan(profile.first_year, profile.last_year),
+      ].filter(Boolean);
+      return el(
+        "li",
+        {},
+        el(
+          "label",
+          { class: "author-result" },
+          box,
+          el(
+            "span",
+            {},
+            el("strong", {}, profile.name),
+            el("span", { class: "paper-meta" }, `${profile.id} · ${facts.join(" · ")}`),
+            profile.topics.length ? el("span", { class: "paper-meta" }, profile.topics.join("; ")) : null
+          )
+        )
+      );
+    })
+  );
+  create.textContent = mode === "add" ? "Add to this project" : "Create author project";
+  $("author-picker").hidden = false;
+  sync();
+}
+
+function authorReportText(report) {
+  const parts = [`${plural(report.papers, "paper")} of theirs in the project, ${report.new_papers.length} new.`];
+  if (report.claimed) {
+    parts.push(`${plural(report.claimed, "paper")} missing from their profile came from their reference lists.`);
+  }
+  if (report.capped) parts.push(`OpenAlex lists ${report.total}, and the most cited were fetched.`);
+  parts.push(`${plural(report.inspirations, "paper")} they cite added to review. Cost $${report.cost_usd.toFixed(4)}.`);
+  return parts.join(" ");
+}
+
+async function createAuthorProject() {
+  const button = $("author-create");
+  const ids = [...state.picker.chosen];
+  button.disabled = true;
+  button.textContent = "Fetching their papers...";
+  say("Fetching their papers and what they cite. A prolific author can take a minute.");
+  try {
+    if (state.picker.mode === "add") {
+      const report = await api(projectPath("/author/profiles"), { author_ids: ids });
+      closeAuthorForm();
+      await refresh();
+      say(authorReportText(report));
+    } else {
+      const { id, report } = await api("/api/author-projects", { author_ids: ids });
+      closeAuthorForm();
+      await switchProject(id);
+      say(authorReportText(report));
+    }
+  } finally {
+    button.textContent = state.picker.mode === "add" ? "Add to this project" : "Create author project";
+    button.disabled = state.picker.chosen.size === 0;
+  }
+}
+
 const LIST_HEADINGS = {
+  overview: "Overview",
   suggestions: "Suggestions",
   added: "Added papers",
   recent: "State of the art",
   authors: "Authors",
+  inspirations: "Inspirations",
+  coauthors: "Co-authors",
 };
 
-async function setListMode(mode) {
-  state.listMode = mode;
+function listHeading(mode) {
+  if (isAuthorProject() && mode === "added") return "Their papers";
+  if (isAuthorProject() && mode === "suggestions") return "To review";
+  return LIST_HEADINGS[mode];
+}
+
+function markListMode() {
+  const mode = state.listMode;
   for (const name of Object.keys(LIST_HEADINGS)) {
     $(`list-${name}`).setAttribute("aria-pressed", String(mode === name));
   }
-  $("suggestions-heading").textContent = LIST_HEADINGS[mode];
-  $("filters").hidden = mode === "added" || mode === "authors";
-  state.authorOpen = null;
-  state.highlight = null;
+  $("suggestions-heading").textContent = listHeading(mode);
+  $("filters").hidden = !["suggestions", "recent"].includes(mode);
   $("recent-filter").hidden = mode !== "recent";
   // Added papers mode leaves out everything still to review, counts included.
   for (const id of ["tb-frontier-cell", "legend-review"]) $(id).hidden = mode === "added";
+}
+
+async function setListMode(mode) {
+  state.listMode = mode;
+  state.authorOpen = null;
+  state.highlight = null;
+  markListMode();
   if (mode === "recent" && state.view !== "timeline") setView("timeline");
   await Promise.all([loadList(), loadGraph()]);
 }
@@ -356,7 +900,7 @@ async function loadFrontier() {
   if ($("min-impact").value) params.set("min_impact", $("min-impact").value);
   if ($("sort-by").value !== "relevance") params.set("sort", $("sort-by").value);
   if (state.listMode === "recent") params.set("min_year", state.recentSince);
-  const data = await api(projectPath(`/frontier?${params}`));
+  const data = await projectGet(`/frontier?${params}`);
   state.items = data.items;
   renderFrontier(data.total, data.matching);
 }
@@ -442,7 +986,10 @@ function categoryOf(node) {
 // A category keeps its colour while the project is open, so reloading or
 // filtering never repaints the rest.
 function assignCategories(nodes) {
-  if (state.colourBy === "state") return;
+  if (state.colourBy === "state") {
+    renderLegend(nodes); // hides the key left by another project
+    return;
+  }
   const counts = new Map();
   for (const node of nodes) {
     const category = categoryOf(node);
@@ -518,6 +1065,7 @@ function setColourBy(mode) {
   state.highlight = null;
   assignCategories(state.graph?.graphData().nodes || []);
   renderLegend(state.graph?.graphData().nodes || []);
+  if (state.view === "timeline") configureForces(); // the rows follow the colour
   redraw();
 }
 
@@ -583,6 +1131,18 @@ function isFaded(node) {
 function linkIsLit(link) {
   const ends = [nodeId(link.source), nodeId(link.target)];
   return ends.includes(state.hoverId) || ends.includes(state.selectedId);
+}
+
+// In an author project, a link between two of their papers is a self-citation,
+// drawn dark so their lines of work show. Other links stay faint.
+function isOwnLink(link) {
+  return state.authorGraph && link.source?.state === "seed" && link.target?.state === "seed";
+}
+
+function linkColour(link) {
+  if (linkIsLit(link)) return state.palette.ink;
+  if (isOwnLink(link)) return withAlpha(state.palette.ink, isFaded(link.source) && isFaded(link.target) ? 0.15 : 0.7);
+  return withAlpha(state.palette.pencil, state.view === "timeline" ? 0.12 : 0.3);
 }
 
 function redraw() {
@@ -679,7 +1239,10 @@ function drawLabels(ctx, scale) {
     ctx.fillText(node.label, node.x, box.y + size * 0.1);
   }
   ctx.globalAlpha = 1;
-  if (state.view === "timeline") drawYearTicks(ctx, scale);
+  if (state.view === "timeline") {
+    drawYearTicks(ctx, scale);
+    if (state.lanes.length) drawLaneLabels(ctx, scale);
+  }
 }
 
 function drawYearTicks(ctx, scale) {
@@ -758,6 +1321,69 @@ function targetForce(targets, strengthX, strengthY) {
   return force;
 }
 
+const LANE_GAP = 10;
+const LANE_LABEL_SIZE = 12; // screen pixels
+
+// Colouring by topic or research area gives each category its own row, in the
+// order the categories first appear, so a shift in topic shows as rows starting
+// and stopping. Return each paper's row centre, or null for the importance layout.
+function laneLayout(nodes) {
+  state.lanes = [];
+  if (state.colourBy === "state") return null;
+  const key = (node) => (state.categorySlots.has(categoryOf(node)) ? categoryOf(node) : OTHER);
+  const groups = new Map();
+  for (const node of nodes) {
+    if (!groups.has(key(node))) groups.set(key(node), []);
+    groups.get(key(node)).push(node);
+  }
+  const first = (list) => Math.min(...list.map((node) => node.year || 9999));
+  const order = [...groups].sort(
+    (a, b) => (a[0] === OTHER) - (b[0] === OTHER) || first(a[1]) - first(b[1]) || b[1].length - a[1].length
+  );
+  const centres = new Map();
+  let top = 0;
+  for (const [name, list] of order) {
+    const perYear = new Map();
+    for (const node of list) perYear.set(node.year, (perYear.get(node.year) || 0) + 1);
+    const height = 40 + 10 * Math.max(...perYear.values());
+    centres.set(name, top + height / 2);
+    state.lanes.push({ name, top, height });
+    top += height + LANE_GAP;
+  }
+  return (node) => centres.get(key(node));
+}
+
+// Faint alternate bands behind the rows, so each row reads as one.
+function drawLaneBands(ctx) {
+  if (state.view !== "timeline" || !state.lanes.length || !state.graph) return;
+  const { paper } = state.palette;
+  const left = state.graph.screen2GraphCoords(0, 0).x;
+  const right = state.graph.screen2GraphCoords($("graph").clientWidth, 0).x;
+  state.lanes.forEach((lane, index) => {
+    if (index % 2) return;
+    ctx.fillStyle = withAlpha(paper, 0.55);
+    ctx.fillRect(left, lane.top - LANE_GAP / 2, right - left, lane.height + LANE_GAP);
+  });
+}
+
+// Row names stay at the left edge of the screen while you pan.
+function drawLaneLabels(ctx, scale) {
+  const { ink, sheet } = state.palette;
+  const size = LANE_LABEL_SIZE / scale;
+  const x = state.graph.screen2GraphCoords(8, 0).x;
+  ctx.font = `600 ${size}px "Barlow Semi Condensed", sans-serif`;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  for (const lane of state.lanes) {
+    const label = lane.name.length > 40 ? `${lane.name.slice(0, 39)}…` : lane.name;
+    const width = ctx.measureText(label).width + 6 / scale;
+    ctx.fillStyle = withAlpha(sheet, 0.85);
+    ctx.fillRect(x - 3 / scale, lane.top, width, size * 1.3);
+    ctx.fillStyle = ink;
+    ctx.fillText(label, x, lane.top + size * 0.12);
+  }
+}
+
 // Each year gets room for the papers it holds, and empty years take little,
 // so a crowded 2026 spreads out instead of being squeezed against 1960.
 function timelineTargets(nodes) {
@@ -782,6 +1408,7 @@ function timelineTargets(nodes) {
   const smallest = Math.min(...radii);
   const span = Math.max(...radii) - smallest || 1;
   const height = Math.max(240, x * 0.5);
+  const lane = laneLayout(nodes);
   const targets = new Map();
   // Within its year, a paper sits by publication date, so the columns read as time.
   const withinYear = (node) => {
@@ -792,7 +1419,7 @@ function timelineTargets(nodes) {
   for (const node of nodes) {
     targets.set(node.id, {
       x: starts.has(node.year) ? starts.get(node.year) + widths.get(node.year) * withinYear(node) : -40,
-      y: height * (1 - (radius(node) - smallest) / span), // more important is higher
+      y: lane ? lane(node) : height * (1 - (radius(node) - smallest) / span), // more important is higher
     });
   }
   return targets;
@@ -807,7 +1434,8 @@ function configureForces() {
   graph.d3Force("charge").strength(timeline ? -6 : -40).distanceMax(320);
   graph.d3Force("center", timeline ? null : state.centerForce);
   graph.d3Force("collide", collideForce());
-  graph.d3Force("target", timeline ? targetForce(timelineTargets(nodes), 0.3, 0.12) : null);
+  const targets = timeline ? timelineTargets(nodes) : null;
+  graph.d3Force("target", timeline ? targetForce(targets, 0.3, state.lanes.length ? 0.35 : 0.12) : null);
   graph.d3Force("gravity", timeline ? null : gravityForce(0.04));
   state.fitPending = true;
   graph.d3ReheatSimulation();
@@ -841,15 +1469,14 @@ function initGraph() {
     .nodeLabel((node) => `${node.label}: ${plain(node.title)}`)
     .nodeCanvasObject(drawNode)
     .nodePointerAreaPaint(paintHitArea)
-    .linkColor((link) =>
-      linkIsLit(link)
-        ? state.palette.ink
-        : withAlpha(state.palette.pencil, state.view === "timeline" ? 0.12 : 0.3)
-    )
-    .linkWidth((link) => (linkIsLit(link) ? 1.6 : 0.6))
-    .linkDirectionalArrowLength((link) => (linkIsLit(link) ? 4 : 2))
+    .linkColor(linkColour)
+    .linkWidth((link) => (linkIsLit(link) ? 1.6 : isOwnLink(link) ? 1.2 : 0.6))
+    .linkDirectionalArrowLength((link) => (linkIsLit(link) ? 4 : isOwnLink(link) ? 3.5 : 2))
     .linkDirectionalArrowRelPos(1)
-    .linkDirectionalArrowColor((link) => (linkIsLit(link) ? state.palette.ink : withAlpha(state.palette.pencil, 0.4)))
+    .linkDirectionalArrowColor((link) =>
+      linkIsLit(link) || isOwnLink(link) ? linkColour(link) : withAlpha(state.palette.pencil, 0.4)
+    )
+    .onRenderFramePre(drawLaneBands)
     .onRenderFramePost(drawLabels)
     .onBackgroundClick(() => {
       if (state.highlight && !$("graph-search").value) {
@@ -901,8 +1528,15 @@ function padMessage(nodes) {
   $("pad-empty").textContent = message;
 }
 
+function graphLimit() {
+  if (!isAuthorProject()) return GRAPH_LIMIT;
+  const counts = currentProject().counts;
+  const theirs = (counts.seed || 0) + (counts.accepted || 0) + (counts.read || 0);
+  return Math.min(AUTHOR_GRAPH_MAX, theirs + AUTHOR_GRAPH_EXTRA);
+}
+
 function graphQuery() {
-  const params = new URLSearchParams({ limit: GRAPH_LIMIT });
+  const params = new URLSearchParams({ limit: graphLimit() });
   if (state.justAdded.length) params.set("include", state.justAdded.join(","));
   if (state.listMode === "added") params.set("mode", "added");
   if (state.listMode === "recent") {
@@ -920,7 +1554,7 @@ async function loadGraph() {
     padMessage(0);
     return;
   }
-  const data = await api(projectPath(`/graph?${graphQuery()}`));
+  const data = await projectGet(`/graph?${graphQuery()}`);
   const previous = new Map(graph.graphData().nodes.map((node) => [node.id, node]));
   state.neighbours = new Map(data.nodes.map((node) => [node.id, new Set()]));
   for (const edge of data.edges) {
@@ -958,9 +1592,15 @@ async function loadGraph() {
   state.highlight = words.length
     ? new Set(data.nodes.filter((node) => matchesQuery(node, words)).map((node) => node.id))
     : null;
+  state.authorGraph = isAuthorProject();
+  // Self-citations go last, so they are drawn over the faint links.
+  const theirs = new Set(data.nodes.filter((node) => node.state === "seed").map((node) => node.id));
+  const own = (edge) => state.authorGraph && theirs.has(edge.source) && theirs.has(edge.target);
   graph.graphData({
     nodes: data.nodes,
-    links: data.edges.map((edge) => ({ source: edge.source, target: edge.target })),
+    links: [...data.edges]
+      .sort((a, b) => own(a) - own(b))
+      .map((edge) => ({ source: edge.source, target: edge.target })),
   });
   configureForces();
   padMessage(data.nodes.length);
@@ -1020,7 +1660,7 @@ async function runSearch(query) {
     return;
   }
   const params = new URLSearchParams({ q: query, limit: SEARCH_SHOWN });
-  const { items } = await api(projectPath(`/search?${params}`));
+  const { items } = await projectGet(`/search?${params}`);
   if ($("graph-search").value.trim() !== query) return; // a newer query is on its way
   // The server also matches authors beyond the few each graph node carries.
   for (const item of items) if (onGraph(item.id)) state.highlight.add(item.id);
@@ -1134,7 +1774,13 @@ function renderDetailsEmpty() {
   markSelectedRow();
   highlightSelection();
   $("paper-details").replaceChildren(
-    el("p", { class: "empty" }, "Select a paper to read its abstract and see why it was suggested.")
+    el(
+      "p",
+      { class: "empty" },
+      isAuthorProject()
+        ? "Select a paper to see what it builds on and which of their papers cite it."
+        : "Select a paper to read its abstract and see why it was suggested."
+    )
   );
 }
 
@@ -1169,6 +1815,50 @@ function whySection(item) {
       ? el("ul", {}, ...item.reasons.map((reason) => el("li", {}, reason)))
       : el("p", { class: "muted" }, "It is connected to your papers through the wider graph.")
   );
+}
+
+// Where a paper sits in an author's work: what it builds on and what builds on it.
+function authorSection(work) {
+  const context = work.author;
+  if (!context) return null;
+  const counted = (paper) =>
+    `${paper.label}: ${plain(paper.title)}${paper.count > 1 ? ` (cited in ${paper.count} of their papers)` : ""}`;
+  const block = (heading, papers, note, describe) =>
+    papers.length
+      ? el("div", { class: "detail-block" }, el("h3", {}, heading), note ? el("p", { class: "muted" }, note) : null, linkList(papers, describe))
+      : null;
+  if (context.kind === "cited") {
+    const years = context.papers.map((paper) => paper.year).filter(Boolean);
+    return block(
+      `Cited in ${context.papers.length} of their papers`,
+      context.papers,
+      years.length ? `From ${yearSpan(years[0], years[years.length - 1])}.` : null
+    );
+  }
+  const blocks = [
+    context.claimed
+      ? el(
+          "div",
+          { class: "detail-block" },
+          el("p", { class: "muted" }, "Missing from their OpenAlex profile. It was added because their papers cite it and it lists them."),
+          el("button", { type: "button", onclick: () => attempt(() => notTheirs(work.id, work.title)) }, "Not theirs")
+        )
+      : null,
+    block("Builds on their earlier papers", context.builds_on),
+    block("Their later papers that build on it", context.built_on_by),
+    block(
+      "Cited here for the first time",
+      context.new_here,
+      `Papers none of their earlier papers cite${context.new_total > context.new_here.length ? `, ${context.new_here.length} of ${context.new_total}, the ones they cite most later first` : ""}.`,
+      counted
+    ),
+  ];
+  if (!work.n_refs && !context.builds_on.length) {
+    blocks.splice(1, 0, el("p", { class: "muted detail-block" }, "OpenAlex has no reference list for it, so what it builds on is unknown."));
+  } else if (!context.builds_on.length && !context.built_on_by.length) {
+    blocks.splice(1, 0, el("p", { class: "muted detail-block" }, "It cites none of their other papers, and none of them cite it."));
+  }
+  return blocks.filter(Boolean);
 }
 
 function ieeeSection(work) {
@@ -1236,7 +1926,10 @@ async function selectPaper(workId) {
     const mine = work.mine.cited_in.length
       ? el("p", { class: "tag-cited detail-venue" }, `You cited this in ${work.mine.cited_in.join(", ")}.`)
       : null;
-    const actions = work.state
+    const theirs = isAuthorProject() && work.state === "seed";
+    const actions = theirs
+      ? null // an author's own paper is not triaged; it can only be marked not theirs
+      : work.state
       ? el(
           "div",
           { class: "detail-actions" },
@@ -1247,7 +1940,7 @@ async function selectPaper(workId) {
       : null;
 
     const tags = [
-      STATE_NAMES[work.state] ? el("span", { class: "tag" }, STATE_NAMES[work.state]) : null,
+      stateName(work.state) ? el("span", { class: "tag" }, stateName(work.state)) : null,
       work.rank ? el("span", { class: "tag tag-rank" }, rankLabel(work.rank, true)) : null,
       impactTag(work.journal),
     ].filter(Boolean);
@@ -1259,9 +1952,10 @@ async function selectPaper(workId) {
       tags.length ? el("div", { class: "tags" }, ...tags) : null,
       mine,
       actions,
-      whySection(item),
-      linkedList("Cites these project papers", item?.linked.cites),
-      linkedList("Cited by these project papers", item?.linked.cited_by),
+      whySection(item?.reasons && !theirs ? item : null),
+      ...[authorSection(work) || []].flat(),
+      linkedList("Cites these project papers", item?.linked?.cites),
+      linkedList("Cited by these project papers", item?.linked?.cited_by),
       el(
         "div",
         { class: "detail-block" },
@@ -1342,7 +2036,7 @@ async function findCiters(work, choice, order, button, result) {
     parts.push(`Cost $${report.cost_usd.toFixed(4)}.`);
 
     state.justAdded = [...new Set([...state.justAdded, ...report.added])];
-    if (state.listMode === "added" || state.listMode === "authors") await setListMode("suggestions");
+    if (!["suggestions", "recent"].includes(state.listMode)) await setListMode("suggestions");
     await refresh();
     state.highlight = report.added.length ? new Set([work.id, ...report.added]) : null;
     redraw();
@@ -1409,8 +2103,15 @@ async function expand() {
 async function checkNewPapers() {
   const button = $("update-button");
   button.disabled = true;
-  say("Checking for new citing papers...");
   try {
+    if (isAuthorProject()) {
+      say("Fetching their papers again...");
+      const report = await api(projectPath("/author/update"), {});
+      say(authorReportText(report));
+      await refresh();
+      return;
+    }
+    say("Checking for new citing papers...");
     const report = await api(projectPath("/update"), {});
     const parts = [
       `${plural(report.new_papers.length, "new paper")} since ${report.since}.`,
@@ -1579,8 +2280,14 @@ function handleShortcut(event) {
 function bindEvents() {
   $("project-select").addEventListener("change", (event) => {
     if (event.target.value === NEW_PROJECT) {
+      closeAuthorForm();
       $("project-form").hidden = false;
       $("project-name").focus();
+      event.target.value = state.projectId ? String(state.projectId) : "";
+      return;
+    }
+    if (event.target.value === NEW_AUTHOR_PROJECT) {
+      openAuthorForm();
       event.target.value = state.projectId ? String(state.projectId) : "";
       return;
     }
@@ -1623,11 +2330,21 @@ function bindEvents() {
     });
   });
 
+  $("author-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    attempt(findAuthors);
+  });
+  $("author-cancel").addEventListener("click", closeAuthorForm);
+  $("author-close").addEventListener("click", closeAuthorForm);
+  $("author-create").addEventListener("click", () => attempt(createAuthorProject));
   $("expand-button").addEventListener("click", () => attempt(expand));
   $("list-suggestions").addEventListener("click", () => attempt(() => setListMode("suggestions")));
   $("list-added").addEventListener("click", () => attempt(() => setListMode("added")));
   $("list-recent").addEventListener("click", () => attempt(() => setListMode("recent")));
   $("list-authors").addEventListener("click", () => attempt(() => setListMode("authors")));
+  $("list-overview").addEventListener("click", () => attempt(() => setListMode("overview")));
+  $("list-inspirations").addEventListener("click", () => attempt(() => setListMode("inspirations")));
+  $("list-coauthors").addEventListener("click", () => attempt(() => setListMode("coauthors")));
   $("colour-by").addEventListener("change", (event) => setColourBy(event.target.value));
   $("tune-button").addEventListener("click", () => attempt(tuneWeights));
   $("targets-drawer").addEventListener("toggle", (event) => {

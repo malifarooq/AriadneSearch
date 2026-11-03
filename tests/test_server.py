@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import FakeOpenAlex, make_client, small_field
+from conftest import FakeOpenAlex, author_career, author_profiles, make_client, small_field
 from ariadnesearch import server
 from ariadnesearch.config import load_config
 from ariadnesearch.db import connect, usage_today
@@ -380,3 +380,48 @@ def test_usage_is_counted_per_day(api):
     conn = connect(load_config().graph_db)
     assert usage_today(conn, "openalex")[0] > 0
     conn.close()
+
+
+def author_api(api) -> int:
+    api.fake.works.update(
+        {item["id"].rsplit("/", 1)[-1]: item for item in author_career()}
+    )
+    api.fake.authors = author_profiles()
+    response = api.post("/api/author-projects", json={"author_ids": ["A1"]})
+    assert response.status_code == 200
+    assert response.json()["report"]["papers"] == 5
+    return response.json()["id"]
+
+
+def test_author_search_returns_profiles(api):
+    api.fake.authors = author_profiles()
+    found = api.post("/api/authors/search", json={"query": "Grace Hopper"}).json()["authors"]
+    assert found[0]["id"] == "A1"
+    assert found[0]["institutions"] == ["Test University"]
+    assert "alternatives" not in found[0]
+
+
+def test_author_project_endpoints(api):
+    project_id = author_api(api)
+    projects = {item["id"]: item for item in api.get("/api/projects").json()["projects"]}
+    assert projects[project_id]["kind"] == "author"
+    assert projects[project_id]["pending"] == 0
+
+    view = api.get(f"/api/projects/{project_id}/author").json()
+    assert view["papers"] == 5
+    assert view["inspirations"][0]["title"] == "Notes on the analytical engine"
+
+    own = view["coauthors"][0]["work_ids"][0]
+    details = api.get(f"/api/projects/{project_id}/works/{own}").json()
+    assert details["author"]["kind"] == "own"
+
+    update = api.post(f"/api/projects/{project_id}/author/update").json()
+    assert update["papers"] == 5 and update["new_papers"] == []
+
+
+def test_topic_projects_have_no_author_view(api):
+    project_id = project_with_graph(api)
+    projects = {item["id"]: item for item in api.get("/api/projects").json()["projects"]}
+    assert projects[project_id]["kind"] == "topic"
+    assert api.get(f"/api/projects/{project_id}/author").status_code == 404
+    assert api.post(f"/api/projects/{project_id}/author/update").status_code == 400

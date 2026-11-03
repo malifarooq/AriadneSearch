@@ -31,8 +31,12 @@ def work(
     abstract: dict | None = None,
     arxiv: str | None = None,
     topic: tuple[str, str, str] | None = None,
+    author_ids: tuple[str, ...] = (),
 ) -> dict:
-    """Build one work in the OpenAlex response format. `topic` is (topic, subfield, field)."""
+    """Build one work in the OpenAlex response format. `topic` is (topic, subfield, field).
+
+    `author_ids` gives OpenAlex author IDs to the first authors, in order.
+    """
     source = (
         {
             "id": f"https://openalex.org/{venue[0]}",
@@ -59,7 +63,14 @@ def work(
         "primary_location": location,
         "locations": locations,
         "authorships": [
-            {"author": {"display_name": name}, "raw_author_name": name} for name in authors
+            {
+                "author": {
+                    "display_name": name,
+                    **({"id": f"https://openalex.org/{author_ids[index]}"} if index < len(author_ids) else {}),
+                },
+                "raw_author_name": name,
+            }
+            for index, name in enumerate(authors)
         ],
         "abstract_inverted_index": abstract,
         "cited_by_count": cited_by,
@@ -82,12 +93,41 @@ def work(
     }
 
 
+def author(
+    author_id: str,
+    name: str,
+    works_count: int = 10,
+    cited_by: int = 100,
+    orcid: str | None = None,
+    alternatives: tuple[str, ...] = (),
+) -> dict:
+    """Build one author in the OpenAlex response format."""
+    return {
+        "id": f"https://openalex.org/{author_id}",
+        "display_name": name,
+        "display_name_alternatives": [name, *alternatives],
+        "orcid": f"https://orcid.org/{orcid}" if orcid else None,
+        "works_count": works_count,
+        "cited_by_count": cited_by,
+        "summary_stats": {"h_index": 5, "2yr_mean_citedness": 1.0},
+        "last_known_institutions": [{"display_name": "Test University"}],
+        "topics": [{"display_name": "Readout"}],
+        "counts_by_year": [{"year": 2015, "works_count": 2}, {"year": 2020, "works_count": 1}],
+    }
+
+
 class FakeOpenAlex:
     """An in-memory API. It rejects requests that break documented limits."""
 
-    def __init__(self, works: list[dict], sources: list[dict] | None = None):
+    def __init__(
+        self,
+        works: list[dict],
+        sources: list[dict] | None = None,
+        authors: list[dict] | None = None,
+    ):
         self.works = {item["id"].rsplit("/", 1)[-1]: item for item in works}
         self.sources = sources or []
+        self.authors = authors or []
         self.calls: list[httpx.URL] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -108,6 +148,23 @@ class FakeOpenAlex:
             )
         if path == "/works":
             return self._list(params, per_page)
+        if path == "/authors":
+            term = params.get("search", "").lower()
+            found = [
+                item for item in self.authors
+                if any(word in item["display_name"].lower() for word in term.split())
+            ]
+            return httpx.Response(
+                200,
+                json={"meta": {"count": len(found), "cost_usd": SEARCH_COST}, "results": found},
+            )
+        if path.startswith("/authors/"):
+            wanted = path.removeprefix("/authors/")
+            for item in self.authors:
+                orcid = (item["orcid"] or "").rsplit("/", 1)[-1]
+                if wanted in (item["id"].rsplit("/", 1)[-1], f"orcid:{orcid}"):
+                    return httpx.Response(200, json=item)
+            return httpx.Response(404, json={})
 
         identifier = path.removeprefix("/works/")
         if identifier.startswith("doi:"):
@@ -180,6 +237,13 @@ class FakeOpenAlex:
                 if item["primary_location"]["source"]
                 and item["primary_location"]["source"]["id"].endswith(value)
             ]
+        if name == "author.id":
+            wanted = {f"https://openalex.org/{item}" for item in values}
+            return [
+                item
+                for item in matches
+                if wanted & {(entry["author"] or {}).get("id") for entry in item["authorships"]}
+            ]
         if name == "from_publication_date":
             return [item for item in matches if item["publication_date"] >= value]
         raise AssertionError(f"Unexpected filter: {name}")
@@ -206,6 +270,54 @@ def small_field() -> list[dict]:
         work(30, "Dispersive readout theory", 2010, (), 500, "10.1000/cocited.30", percentile=0.9),
         work(40, "Unrelated title, shared foundations", 2021, (10, 11), 12, "10.1000/coupled.40"),
         work(50, "Completely separate subject", 2020, (), 3, "10.1000/other.50"),
+    ]
+
+
+HOPPER = ("Grace Hopper",)  # an author list for `author_career`
+
+
+def author_career() -> list[dict]:
+    """Grace Hopper's papers, A1, and one more under a second profile, A2.
+
+    Paper 201 is cited by three of her papers, 205 and 206 by two from 2019 on.
+    Paper 300 lists her as an author but is missing from her profile.
+    """
+    return [
+        work(101, "Compilers for everyone", 2015, (201, 202, 203),
+             authors=("Grace Hopper", "Alan Turing"), author_ids=("A1",),
+             topic=("Compilers", "Software", "Computer Science")),
+        work(102, "Compilers that read English", 2016, (101, 201, 204),
+             authors=("Grace Hopper", "Alan Turing"), author_ids=("A1",),
+             topic=("Compilers", "Software", "Computer Science")),
+        work(103, "Debugging moths at scale", 2019, (201, 205, 206, 300),
+             authors=("Grace Hopper", "Barbara Liskov"), author_ids=("A1",),
+             topic=("Debugging", "Software", "Computer Science")),
+        work(104, "Nanoseconds made visible", 2020, (205, 206, 102), cited_by=90,
+             authors=("Grace Hopper",), author_ids=("A1",),
+             topic=("Debugging", "Software", "Computer Science")),
+        work(105, "Front matter", 2020, work_type="paratext",
+             authors=HOPPER, author_ids=("A1",)),
+        work(106, "Standards for business languages", 2021, (201,),
+             authors=("G. Hopper",), author_ids=("A2",)),
+        work(201, "Notes on the analytical engine", 1843, cited_by=500,
+             authors=("Ada Lovelace",)),
+        work(202, "On computable numbers", 1936, authors=("Alan Turing",)),
+        work(203, "A first draft report", 1945, authors=("John von Neumann",)),
+        work(204, "The mathematical theory of communication", 1948, authors=("Claude Shannon",)),
+        work(205, "Abstraction in programming", 2010, authors=("Barbara Liskov",)),
+        work(206, "Structured programming notes", 2012, authors=("Edsger Dijkstra",)),
+        work(300, "The first compiler", 2014, authors=("Grace Hopper",)),
+        work(400, "A later paper citing her", 2022, (104,), authors=("Someone Else",)),
+    ]
+
+
+def author_profiles() -> list[dict]:
+    """Profiles for `author_career`, and two that only match a name search."""
+    return [
+        author("A1", "Grace Hopper", works_count=5, orcid="0000-0002-1825-0097"),
+        author("A2", "G. Hopper", works_count=1),
+        author("A9", "Grace Hopper Anderson Smith Jones", works_count=1),
+        author("A8", "Hopper", works_count=400),
     ]
 
 

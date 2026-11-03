@@ -197,10 +197,18 @@ def create_project(conn: sqlite3.Connection, name: str) -> int:
 
 def delete_project(conn: sqlite3.Connection, project_id: int) -> None:
     """Remove a project and its decisions. The papers stay in the shared tables."""
-    for table in ("membership", "populated", "event"):
+    for table in ("membership", "populated", "event", "project_author"):
         conn.execute(f"DELETE FROM {table} WHERE project_id = ?", (project_id,))
     conn.execute("DELETE FROM project WHERE id = ?", (project_id,))
     conn.commit()
+
+
+def is_author_project(conn: sqlite3.Connection, project_id: int) -> bool:
+    """Return whether a project follows one author's papers. See author.py."""
+    row = conn.execute(
+        "SELECT 1 FROM project_author WHERE project_id = ? LIMIT 1", (project_id,)
+    ).fetchone()
+    return row is not None
 
 
 def get_project_id(conn: sqlite3.Connection, name: str) -> int:

@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from conftest import FakeOpenAlex, small_field, work
+from conftest import FakeOpenAlex, author_career, author_profiles, small_field, work
 from ariadnesearch import cli
 from ariadnesearch.ieee import BASE_URL as IEEE_URL
 from ariadnesearch.ieee import IEEEClient
@@ -13,7 +13,7 @@ def run(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ARIADNE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("OPENALEX_API_KEY", "secret-openalex")
     monkeypatch.setenv("IEEE_API_KEY", "")
-    fake = FakeOpenAlex(small_field())
+    fake = FakeOpenAlex(small_field() + author_career(), authors=author_profiles())
 
     def client(conn, api_key, daily_usd=1.0):
         http = httpx.Client(base_url=BASE_URL, transport=httpx.MockTransport(fake))
@@ -180,3 +180,17 @@ def test_venue_commands(run, tmp_path):
     assert run("venue", "map", "Odd Name", "Test Journal")[0] == 0
     assert run("venue", "map", "Odd Name", "No Such Title")[0] == 1
     assert "added" in run("venue", "add", "p", "S1", "--since", "2020")[1]
+
+
+def test_author_commands(run):
+    code, out, _ = run("author", "find", "Grace Hopper")
+    assert code == 0 and out.startswith("A1 ")
+    code, out, _ = run("author", "new", "A1")
+    assert code == 0 and "Created the author project Grace Hopper" in out
+    assert "5 of their papers" in out
+    code, out, _ = run("author", "report", "Grace Hopper")
+    assert code == 0
+    assert "Notes on the analytical engine" in out
+    assert "The first compiler" in out
+    code, out, _ = run("update", "Grace Hopper")
+    assert code == 0 and "0 new" in out

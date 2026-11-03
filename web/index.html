@@ -27,18 +27,38 @@
         <button id="project-cancel" type="button" class="quiet">Cancel</button>
       </form>
 
+      <form id="author-form" class="inline-form grow" hidden>
+        <label class="grow">
+          <span class="visually-hidden">Author name, ORCID or OpenAlex ID</span>
+          <input id="author-query" type="text" placeholder="Author name, ORCID or OpenAlex ID" autocomplete="off">
+        </label>
+        <button type="submit">Find author</button>
+        <button id="author-cancel" type="button" class="quiet">Cancel</button>
+      </form>
+
       <form id="seed-form" class="inline-form grow">
         <label class="grow">
-          <span class="visually-hidden">DOI, arXiv ID or exact title</span>
+          <span id="seed-label" class="visually-hidden">DOI, arXiv ID or exact title</span>
           <input id="seed-input" type="text" placeholder="DOI, arXiv ID or exact title" autocomplete="off">
         </label>
-        <button type="submit">Add seed</button>
+        <button id="seed-button" type="submit">Add seed</button>
       </form>
 
       <button id="expand-button" type="button" class="primary" title="Add the best neighbours of newly added papers, then redraw the graph">Update graph</button>
       <button id="update-button" type="button" title="Fetch papers citing your accepted papers, published since the last run">Check new papers</button>
       <a id="export-link" class="button-link" download="ariadnesearch.bib">Export BibTeX</a>
     </header>
+
+    <section id="author-picker" class="author-picker" aria-labelledby="author-picker-heading" hidden>
+      <h2 id="author-picker-heading">Choose the author</h2>
+      <p class="muted">Tick every profile that is the same person: OpenAlex sometimes splits one
+        person across several. Fetching their papers costs about $0.0001 per 100.</p>
+      <ul id="author-results" class="author-results"></ul>
+      <div class="author-picker-actions">
+        <button id="author-create" type="button" class="primary" disabled>Create author project</button>
+        <button id="author-close" type="button" class="quiet">Close</button>
+      </div>
+    </section>
 
     <p id="status" class="status" role="status"></p>
 
@@ -50,11 +70,16 @@
         </div>
 
         <div class="list-switch" role="group" aria-label="Papers shown">
+          <button id="list-overview" type="button" aria-pressed="false" hidden>Overview</button>
           <button id="list-suggestions" type="button" aria-pressed="true">Suggestions</button>
           <button id="list-added" type="button" aria-pressed="false">Added papers</button>
           <button id="list-recent" type="button" aria-pressed="false" title="Recent papers, best first">State of the art</button>
           <button id="list-authors" type="button" aria-pressed="false" title="Authors who appear on several papers">Authors</button>
+          <button id="list-inspirations" type="button" aria-pressed="false" hidden title="What their papers cite most">Inspirations</button>
+          <button id="list-coauthors" type="button" aria-pressed="false" hidden>Co-authors</button>
         </div>
+
+        <div id="author-panel" class="author-panel" hidden></div>
 
         <label id="recent-filter" class="rank-filter" hidden>
           Published
@@ -133,7 +158,7 @@
           </form>
         </details>
 
-        <details id="weights-drawer" class="drawer">
+        <details id="weights-drawer" class="drawer topic-only">
           <summary>Ranking weights</summary>
           <p id="weights-text" class="muted"></p>
           <button id="tune-button" type="button">Fit to my seed papers</button>
@@ -208,7 +233,7 @@
             <strong id="tb-project">None</strong>
           </div>
           <div class="tb-cell">
-            <span class="tb-label">Seeds</span>
+            <span id="tb-seeds-label" class="tb-label">Seeds</span>
             <strong id="tb-seeds">0</strong>
           </div>
           <div class="tb-cell">
@@ -228,7 +253,8 @@
             <strong id="tb-ieee">0</strong>
           </div>
           <ul class="tb-legend">
-            <li><svg viewBox="0 0 14 14" aria-hidden="true"><path class="mark-ink" d="M7 1 13 7 7 13 1 7Z"/></svg>Seed</li>
+            <li><svg viewBox="0 0 14 14" aria-hidden="true"><path class="mark-ink" d="M7 1 13 7 7 13 1 7Z"/></svg><span id="legend-seed">Seed</span></li>
+            <li id="legend-own-link" hidden><svg viewBox="0 0 14 14" aria-hidden="true"><path class="mark-link" d="M1 11 13 3"/></svg>Cites their own paper</li>
             <li><svg viewBox="0 0 14 14" aria-hidden="true"><circle class="mark-ink" cx="7" cy="7" r="5"/></svg>Accepted</li>
             <li><svg viewBox="0 0 14 14" aria-hidden="true"><circle class="mark-read" cx="7" cy="7" r="5"/></svg>Read</li>
             <li id="legend-review"><svg viewBox="0 0 14 14" aria-hidden="true"><circle class="mark-pencil" cx="7" cy="7" r="5"/></svg>To review</li>

@@ -16,8 +16,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ariadnesearch import views
+from ariadnesearch.author import (
+    add_profiles,
+    author_context,
+    author_view,
+    create_author_project,
+    find_authors,
+    update_author,
+)
 from ariadnesearch.config import REPO_ROOT, load_config
-from ariadnesearch.db import connect, create_project as insert_project, init_db
+from ariadnesearch.db import connect, create_project as insert_project, init_db, is_author_project
 from ariadnesearch.errors import (
     BadInput,
     BudgetExceeded,
@@ -53,6 +61,19 @@ RankFilter = Literal["A*", "A", "B", "C"]
 
 class ProjectRequest(BaseModel):
     name: str
+
+
+class AuthorSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+
+
+class AuthorProjectRequest(BaseModel):
+    author_ids: list[str] = Field(min_length=1, max_length=10)
+    name: str | None = None  # defaults to the author's name
+
+
+class AuthorProfilesRequest(BaseModel):
+    author_ids: list[str] = Field(min_length=1, max_length=10)
 
 
 class SeedRequest(BaseModel):
@@ -186,6 +207,7 @@ def list_projects(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
         "projects": [
             {
                 **dict(row),
+                "kind": "author" if is_author_project(conn, row["id"]) else "topic",
                 "counts": views.project_summary(conn, row["id"]),
                 "pending": pending_count(conn, row["id"]),
             }
@@ -199,6 +221,63 @@ def create_project(
     body: ProjectRequest, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
     return {"id": insert_project(conn, body.name), "name": body.name.strip()}
+
+
+@app.post("/api/authors/search")
+def author_search(
+    body: AuthorSearchRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
+    client: OpenAlexClient = Depends(get_client),
+) -> dict:
+    """Find author profiles by name, ORCID or OpenAlex ID."""
+    profiles = find_authors(client, body.query)
+    return {
+        "authors": [
+            {key: value for key, value in asdict(item).items() if key != "alternatives"}
+            for item in profiles
+        ]
+    }
+
+
+@app.post("/api/author-projects")
+def create_author(
+    body: AuthorProjectRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
+    client: OpenAlexClient = Depends(get_client),
+) -> dict:
+    """Create a project from one person's author profiles and fetch their papers."""
+    project_id, report = create_author_project(conn, client, body.author_ids, body.name)
+    return {"id": project_id, "report": asdict(report)}
+
+
+@app.get("/api/projects/{project_id}/author")
+def author_analysis(project_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """Return how the author's work changes over time and what it draws on."""
+    _require_project(conn, project_id)
+    return author_view(conn, project_id)
+
+
+@app.post("/api/projects/{project_id}/author/update")
+def author_update(
+    project_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
+    client: OpenAlexClient = Depends(get_client),
+) -> dict:
+    """Fetch the author's papers again and add new ones."""
+    _require_project(conn, project_id)
+    return asdict(update_author(conn, client, project_id))
+
+
+@app.post("/api/projects/{project_id}/author/profiles")
+def author_profiles(
+    project_id: int,
+    body: AuthorProfilesRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
+    client: OpenAlexClient = Depends(get_client),
+) -> dict:
+    """Follow another OpenAlex profile of the same person."""
+    _require_project(conn, project_id)
+    return asdict(add_profiles(conn, client, project_id, body.author_ids))
 
 
 @app.post("/api/projects/{project_id}/seeds")
@@ -442,6 +521,7 @@ def work(
     stored = ieee.cached(doi) if doi else None
     return {
         **details,
+        "author": author_context(conn, project_id, work_id),
         "ieee": asdict(stored) if stored else None,
         "ieee_available": bool(doi and is_ieee_doi(doi)),
     }

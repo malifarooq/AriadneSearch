@@ -16,7 +16,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ariadnesearch.db import create_project, delete_project, log_event, utc_now
+from ariadnesearch.db import (
+    create_project,
+    delete_project,
+    is_author_project,
+    log_event,
+    utc_now,
+)
 from ariadnesearch.errors import BadInput
 from ariadnesearch.expand import add_work_ids_as_seeds, expand_project
 from ariadnesearch.openalex import OpenAlexClient
@@ -165,6 +171,11 @@ def tune_project(
             (project_id, *KNOWN_STATES),
         )
     ]
+    if is_author_project(conn, project_id):
+        raise BadInput(
+            "Fitting weights needs a topic project. An author project's seeds are "
+            "one person's papers, not a reading list."
+        )
     if len(papers) < MIN_SEEDS:
         raise BadInput(
             f"Tuning needs at least {MIN_SEEDS} seed or accepted papers, and this project "

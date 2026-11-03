@@ -244,6 +244,7 @@ button.quiet {
 
 .list-switch {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
 }
 
@@ -705,6 +706,12 @@ kbd {
   fill: var(--ink);
 }
 
+.mark-link {
+  stroke: var(--ink);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
 .mark-read {
   fill: var(--pencil);
 }
@@ -777,6 +784,141 @@ a {
   margin-top: 4px;
   color: var(--graphite);
   font-size: 14.5px;
+}
+
+/* Author projects */
+
+.author-picker {
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+}
+
+.author-picker h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.author-results {
+  display: grid;
+  gap: 4px;
+  max-height: 46vh;
+  margin: 8px 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.author-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--rule);
+  background: var(--sheet);
+  cursor: pointer;
+}
+
+.author-result input {
+  margin-top: 4px;
+}
+
+.author-result > span {
+  display: grid;
+  gap: 1px;
+}
+
+.author-picker-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.author-panel {
+  margin: 8px 0 10px;
+}
+
+.author-name {
+  font: 600 20px/1.2 var(--read);
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 10px;
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--rule);
+}
+
+.stat {
+  display: grid;
+  padding: 4px 6px 5px;
+  border-right: 1px solid var(--rule);
+  line-height: 1.2;
+}
+
+.stat:last-child {
+  border-right: 0;
+}
+
+.stat strong {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.stats + .muted {
+  margin-top: 6px;
+  font-size: 14px;
+}
+
+.year-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 4px;
+}
+
+.chart-bar {
+  fill: var(--ink);
+}
+
+.chart-base {
+  stroke: var(--rule);
+  stroke-width: 1;
+}
+
+.chart-label {
+  fill: var(--graphite);
+  font: 400 10px var(--ui);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-hit {
+  fill: transparent;
+  cursor: pointer;
+}
+
+.chart-hit:hover {
+  fill: var(--ink);
+  fill-opacity: 0.06;
+}
+
+.chart-readout {
+  min-height: 1.3em;
+  font-size: 14px;
+}
+
+.claimed-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+button.small {
+  flex: none;
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 14px;
 }
 
 @media (max-width: 1100px) {

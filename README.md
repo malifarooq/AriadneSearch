@@ -1,7 +1,9 @@
 # AriadneSearch
 
 A local citation graph explorer. Start from papers you know, fetch what they cite
-and what cites them, and triage ranked suggestions on an interactive map.
+and what cites them, and triage ranked suggestions on an interactive map. Or start
+from one researcher, and see how their papers build on each other and what they
+draw on.
 
 OpenAlex supplies the citation graph. IEEE Xplore adds details when you ask for
 them. Everything you collect stays in the `data/` folder on your own machine.
@@ -93,7 +95,10 @@ labels appear as you zoom in, and hovering a paper dims everything not linked to
   being new), raw citations, citations from papers in the project, or relevance.
   Sizes follow each paper's rank among the papers shown.
 - **Timeline** runs left to right by publication date, and each year gets room for
-  the papers it holds. Height is the same importance measure as size.
+  the papers it holds. When colouring by paper state, height is the same importance
+  measure as size. When colouring by topic or research area, each one gets its own
+  row, in the order they first appear, so a change of topic shows as one row
+  starting and another stopping.
 
 The strip below the graph shows today's API use.
 
@@ -114,6 +119,57 @@ costs nothing. From the terminal:
 ```bash
 ariadne citers PROJECT PAPER --add 25                # PAPER: an ID from `rank`, or a DOI
 ariadne citers PROJECT PAPER --add 25 --most-cited
+```
+
+## Studying one author
+
+An author project follows one researcher instead of a topic. Choose **New author
+project** in the project menu, and search by name, ORCID or OpenAlex ID. Each
+match shows the person's institution, paper count, citations, h-index, active
+years and main topics, so you can tell people with the same name apart. OpenAlex
+sometimes splits one person across several profiles: tick every one that is them.
+You can add a profile later with **Add another profile of this person**.
+
+Creating it fetches their papers, one list call per 100, and the titles, authors
+and topics of everything they cite, one more call per 100. An author with 35
+papers cost $0.0007 and took a few seconds. The 200 papers they cite most are
+added to review.
+
+- **Overview**: papers per year, citations, and the number of self-citations,
+  meaning links from one of their papers to another. Click a year to light its
+  papers on the graph.
+- **Their papers**: only their papers and the links between them, which shows
+  their lines of work.
+- **Inspirations**: the papers they cite, counted by how many of their papers
+  cite each one, with the years they cited it. Order them by count, by how long
+  they kept citing them, or by when they first did. **Authors** lists the people
+  they cite most, with or without their co-authors.
+- **Co-authors**: who they wrote with, and when. Clicking a name highlights the
+  joint papers.
+- **To review**: the papers they cite, plus whatever your accepted papers bring in.
+
+The graph opens on the timeline, coloured by topic with one row per topic, and
+sized by how many of their papers cite each paper. Self-citations are drawn dark,
+and other links stay faint. Selecting one of their papers shows which of their
+earlier papers it builds on, which later ones build on it, and the papers it cites
+that none of their earlier papers did, which is where new ideas enter their work.
+
+A cited paper that lists them but is missing from their OpenAlex profile is added
+to their papers, so its self-citations show. The overview lists these. If one
+belongs to someone with the same name, mark it **Not theirs** and it counts as a
+paper they cite instead.
+
+Their own papers never fetch citing papers or add neighbours when you press
+**Update graph**: a prolific author would bring in many thousands. Papers you
+accept grow the project as usual. **Check new papers** fetches their papers again,
+adding new ones and refreshing citation counts. Fitting ranking weights needs a
+topic project. From the terminal:
+
+```bash
+ariadne author find "Ada Lovelace"       # lists matching profiles and their IDs
+ariadne author new AUTHOR_ID             # add more IDs for split profiles
+ariadne author report "Ada Lovelace"     # output, inspirations and co-authors
+ariadne update "Ada Lovelace"            # fetch their papers again
 ```
 
 ## Keeping a project current
@@ -329,6 +385,10 @@ list, use **Export BibTeX**, or `ariadne export PROJECT --out refs.bib`.
 | `ariadne mine sync` | Import your published papers' citations |
 | `ariadne mine draft TITLE --citations FILE` | Save a draft's citations as a list |
 | `ariadne mine list [TITLE]` | Show your citation lists |
+| `ariadne author find NAME` | Find an author's OpenAlex ID, by name, ORCID or ID |
+| `ariadne author new ID...` | Create an author project. Also takes `--name` |
+| `ariadne author add PROJECT ID...` | Follow another profile of the same person |
+| `ariadne author report PROJECT` | Show their output, inspirations and co-authors |
 | `ariadne venue import --download` | Download and load the CORE list |
 | `ariadne venue targets [FILE]` | Show or load your target venue list |
 | `ariadne venue find NAME` | Find a venue's OpenAlex ID |

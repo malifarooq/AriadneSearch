@@ -185,3 +185,15 @@ CREATE TABLE IF NOT EXISTS venue_alias (
     title    TEXT,            -- NULL: checked, no CORE match
     method   TEXT NOT NULL    -- title, acronym, words, unmatched, manual
 );
+
+-- The people an author project follows. OpenAlex sometimes splits one person
+-- across several profiles, so a project can follow more than one. See author.py.
+CREATE TABLE IF NOT EXISTS project_author (
+    project_id   INTEGER NOT NULL REFERENCES project(id),
+    author_id    TEXT NOT NULL,              -- OpenAlex author ID, A123
+    name         TEXT NOT NULL,
+    names_json   TEXT NOT NULL DEFAULT '[]', -- spellings, to leave them out of co-authors
+    profile_json TEXT NOT NULL DEFAULT '{}', -- institution, h-index and counts
+    fetched_at   TEXT,                       -- when their papers were last fetched
+    PRIMARY KEY (project_id, author_id)
+) WITHOUT ROWID;

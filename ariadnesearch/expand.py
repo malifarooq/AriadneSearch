@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 from ariadnesearch import references
-from ariadnesearch.db import chunks, log_event, usage_today, utc_now
+from ariadnesearch.db import chunks, is_author_project, log_event, usage_today, utc_now
 from ariadnesearch.errors import BadInput, NotFound
 from ariadnesearch.identity import best_title_match, resolve, upsert_work
 from ariadnesearch.journals import refresh_impact
@@ -276,13 +276,26 @@ def expand_citers(
     return len(records), total > cap
 
 
-def _known_ids(conn: sqlite3.Connection, project_id: int) -> list[str]:
-    marks = ",".join("?" * len(KNOWN_STATES))
+def _known_ids(
+    conn: sqlite3.Connection, project_id: int, states: tuple[str, ...] = KNOWN_STATES
+) -> list[str]:
+    marks = ",".join("?" * len(states))
     rows = conn.execute(
         f"SELECT work_id FROM membership WHERE project_id = ? AND state IN ({marks})",
-        (project_id, *KNOWN_STATES),
+        (project_id, *states),
     )
     return [row["work_id"] for row in rows]
+
+
+def growing_states(conn: sqlite3.Connection, project_id: int) -> tuple[str, ...]:
+    """Return the states of papers whose neighbours join the project.
+
+    An author project's own papers, its seeds, are left out, because a prolific
+    author would bring in many thousands. Papers you accept still grow it.
+    """
+    if is_author_project(conn, project_id):
+        return tuple(state for state in KNOWN_STATES if state != "seed")
+    return KNOWN_STATES
 
 
 def _frontier_ids(conn: sqlite3.Connection, project_id: int) -> list[str]:
@@ -389,7 +402,7 @@ def _populate(
             "SELECT work_id, state FROM membership WHERE project_id = ?", (project_id,)
         ).fetchall()
     )
-    sources = _known_ids(conn, project_id)
+    sources = _known_ids(conn, project_id, growing_states(conn, project_id))
     if only is None:
         done = {
             row[0]
@@ -433,7 +446,8 @@ def _populate(
 
 def pending_count(conn: sqlite3.Connection, project_id: int) -> int:
     """Return how many known papers have not added their neighbours yet."""
-    marks = ",".join("?" * len(KNOWN_STATES))
+    states = growing_states(conn, project_id)
+    marks = ",".join("?" * len(states))
     row = conn.execute(
         f"""
         SELECT COUNT(*) FROM membership m
@@ -443,7 +457,7 @@ def pending_count(conn: sqlite3.Connection, project_id: int) -> int:
             WHERE p.project_id = m.project_id AND p.work_id = m.work_id
         )
         """,
-        (project_id, *KNOWN_STATES),
+        (project_id, *states),
     ).fetchone()
     return int(row[0])
 
@@ -484,7 +498,7 @@ def expand_project(
     known = _known_ids(conn, project_id)
     report.hydrated += hydrate(conn, client, known)
     report.refs_filled = references.fill_from_arxiv(conn, client, known)
-    for work_id in known:
+    for work_id in _known_ids(conn, project_id, growing_states(conn, project_id)):
         fetch(work_id)
 
     if per_paper is not None:
@@ -657,7 +671,7 @@ def update_project(
     openalex_ids = sorted(
         {
             value
-            for work_id in _known_ids(conn, project_id)
+            for work_id in _known_ids(conn, project_id, growing_states(conn, project_id))
             for value in _openalex_ids(conn, work_id)
         }
     )

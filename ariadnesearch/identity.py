@@ -24,6 +24,7 @@ __all__ = [
     "arxiv_doi",
     "best_title_match",
     "classify_pair",
+    "describe_work",
     "merge_works",
     "normalize_doi",
     "normalize_title",
@@ -218,6 +219,68 @@ def upsert_work(conn: sqlite3.Connection, record: WorkRecord) -> int:
     for scheme, value in aliases:
         add_alias(conn, scheme, value, work_id)
     store_references(conn, work_id, record.referenced_ids)
+    return _reconcile_versions(conn, work_id)
+
+
+def describe_work(conn: sqlite3.Connection, record: WorkRecord) -> int | None:
+    """Fill in a placeholder's title, authors, year and topic from a short record.
+
+    The paper stays a placeholder, so its references are still fetched if it
+    joins a project. Return its ID, which changes if it turns out to be another
+    version of a stored paper, or None if it is not stored.
+    """
+    aliases = _aliases(record)
+    matches = list(
+        dict.fromkeys(
+            found
+            for found in (resolve(conn, scheme, value) for scheme, value in aliases)
+            if found
+        )
+    )
+    if not matches:
+        return None
+    work_id = matches[0]
+    for other in matches[1:]:
+        merge_works(conn, work_id, other, rule="shared-id", confidence=1.0)
+    conn.execute(
+        """
+        UPDATE work SET
+            title = COALESCE(title, ?),
+            title_key = COALESCE(title_key, ?),
+            authors = COALESCE(authors, ?),
+            year = COALESCE(year, ?),
+            pub_date = COALESCE(pub_date, ?),
+            type = COALESCE(type, ?),
+            venue = COALESCE(venue, ?),
+            venue_id = COALESCE(venue_id, ?),
+            venue_type = COALESCE(venue_type, ?),
+            oa_cited_by = COALESCE(?, oa_cited_by),
+            oa_pct = COALESCE(?, oa_pct),
+            topic = COALESCE(topic, ?),
+            subfield = COALESCE(subfield, ?),
+            field = COALESCE(field, ?)
+        WHERE id = ?
+        """,
+        (
+            record.title,
+            normalize_title(record.title) if record.title else None,
+            json.dumps(record.authors) if record.authors else None,
+            record.year,
+            record.pub_date,
+            record.type,
+            record.venue,
+            record.venue_id,
+            record.venue_type,
+            record.cited_by_count,
+            record.percentile,
+            record.topic or "",  # '' records that it has none
+            record.subfield,
+            record.field,
+            work_id,
+        ),
+    )
+    for scheme, value in aliases:
+        add_alias(conn, scheme, value, work_id)
     return _reconcile_versions(conn, work_id)
 
 

@@ -25,6 +25,7 @@ class WorkRecord:
     venue_id: str | None = None
     venue_type: str | None = None
     authors: list[str] = field(default_factory=list)
+    author_ids: list[str | None] = field(default_factory=list)  # OpenAlex IDs, in `authors` order
     abstract: str | None = None
     cited_by_count: int | None = None
     percentile: float | None = None

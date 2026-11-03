@@ -30,6 +30,7 @@ from ariadnesearch.errors import BudgetExceeded, MissingKey, UpstreamError
 from ariadnesearch.records import WorkRecord, clean_arxiv_id, normalize_doi
 
 __all__ = [
+    "AuthorProfile",
     "OpenAlexClient",
     "SourceStats",
     "VenueCandidate",
@@ -65,6 +66,36 @@ SELECT_FIELDS = ",".join(
         "primary_topic",
     ]
 )
+# Enough to name and place a paper, for papers known only from reference lists.
+DESCRIBE_FIELDS = ",".join(
+    [
+        "id",
+        "doi",
+        "title",
+        "publication_year",
+        "publication_date",
+        "type",
+        "primary_location",
+        "authorships",
+        "cited_by_count",
+        "citation_normalized_percentile",
+        "primary_topic",
+    ]
+)
+AUTHOR_FIELDS = ",".join(
+    [
+        "id",
+        "display_name",
+        "display_name_alternatives",
+        "orcid",
+        "works_count",
+        "cited_by_count",
+        "summary_stats",
+        "last_known_institutions",
+        "topics",
+        "counts_by_year",
+    ]
+)
 CiterOrder = Literal["newest", "most_cited"]
 CITER_SORTS = {"newest": "publication_date:desc", "most_cited": "cited_by_count:desc"}
 _ARXIV_URL = re.compile(
@@ -78,6 +109,21 @@ class VenueCandidate:
     name: str
     type: str | None
     works_count: int | None
+
+
+@dataclass
+class AuthorProfile:
+    id: str
+    name: str
+    orcid: str | None
+    institutions: list[str]
+    works_count: int
+    cited_by: int
+    h_index: int | None
+    topics: list[str]  # their most frequent OpenAlex topics
+    first_year: int | None
+    last_year: int | None
+    alternatives: list[str]  # other spellings of the name
 
 
 @dataclass
@@ -310,6 +356,53 @@ class OpenAlexClient:
         )
         return [parse_work(item) for item in results], total
 
+    def works_by_authors(
+        self, author_ids: list[str], cap: int
+    ) -> tuple[list[WorkRecord], int]:
+        """Return up to `cap` works by any of these author profiles, most cited first."""
+        results, total = self._fetch_all(
+            "/works",
+            {
+                "filter": "author.id:" + "|".join(short_id(item) for item in author_ids),
+                "sort": "cited_by_count:desc",
+                "select": SELECT_FIELDS,
+            },
+            cap,
+        )
+        return [parse_work(item) for item in results], total
+
+    def describe_works(self, openalex_ids: list[str]) -> list[WorkRecord]:
+        """Return titles, authors, years and topics, 100 per call.
+
+        Records come without abstracts or reference lists, so they stay small.
+        They are not cached, because the caller stores what they hold.
+        """
+        records: list[WorkRecord] = []
+        for chunk in chunks(sorted({short_id(item) for item in openalex_ids}), MAX_OR_VALUES):
+            body = self.get_json(
+                "/works",
+                {
+                    "filter": "openalex:" + "|".join(chunk),
+                    "per_page": MAX_PER_PAGE,
+                    "select": DESCRIBE_FIELDS,
+                },
+                read_cache=False,
+            )
+            records.extend(parse_work(item) for item in (body or {}).get("results", []))
+        return records
+
+    def author(self, identifier: str) -> AuthorProfile | None:
+        """Fetch one author by OpenAlex ID, or by `orcid:` and an ORCID. This is free."""
+        body = self.get_json(f"/authors/{identifier}", {"select": AUTHOR_FIELDS})
+        return parse_author(body) if body else None
+
+    def search_authors(self, name: str, per_page: int = 10) -> list[AuthorProfile]:
+        """Find authors by name. This costs as much as a work search."""
+        body = self.get_json(
+            "/authors", {"search": name, "per_page": per_page, "select": AUTHOR_FIELDS}
+        )
+        return [parse_author(item) for item in (body or {}).get("results", [])]
+
     def search(self, query: str, per_page: int = 25) -> list[WorkRecord]:
         """Keyword search. This costs 10 times a list call."""
         body = self.get_json(
@@ -421,6 +514,36 @@ def find_arxiv_id(raw: dict) -> str | None:
     return None
 
 
+def parse_author(raw: dict) -> AuthorProfile:
+    """Convert one author result into an AuthorProfile."""
+    stats = raw.get("summary_stats") or {}
+    years = [
+        item["year"] for item in raw.get("counts_by_year") or [] if item.get("works_count")
+    ]
+    orcid = raw.get("orcid")
+    return AuthorProfile(
+        id=short_id(raw["id"]),
+        name=raw.get("display_name") or "Unknown",
+        orcid=short_id(orcid) if orcid else None,
+        institutions=[
+            item["display_name"]
+            for item in raw.get("last_known_institutions") or []
+            if item and item.get("display_name")
+        ],
+        works_count=raw.get("works_count") or 0,
+        cited_by=raw.get("cited_by_count") or 0,
+        h_index=stats.get("h_index"),
+        topics=[
+            item["display_name"]
+            for item in (raw.get("topics") or [])[:3]
+            if item.get("display_name")
+        ],
+        first_year=min(years) if years else None,
+        last_year=max(years) if years else None,
+        alternatives=list(raw.get("display_name_alternatives") or []),
+    )
+
+
 def parse_work(raw: dict) -> WorkRecord:
     """Convert one API result into a WorkRecord."""
     location = raw.get("primary_location") or {}
@@ -428,10 +551,14 @@ def parse_work(raw: dict) -> WorkRecord:
     percentile = raw.get("citation_normalized_percentile") or {}
     topic = raw.get("primary_topic") or {}
     references = [short_id(item) for item in raw.get("referenced_works") or []]
-    authors = [
-        (item.get("author") or {}).get("display_name") or item.get("raw_author_name")
+    authorships = [
+        (
+            (item.get("author") or {}).get("display_name") or item.get("raw_author_name"),
+            (item.get("author") or {}).get("id"),
+        )
         for item in raw.get("authorships") or []
     ]
+    authorships = [(name, author_id) for name, author_id in authorships if name]
     return WorkRecord(
         openalex_id=short_id(raw["id"]),
         doi=normalize_doi(raw["doi"]) if raw.get("doi") else None,
@@ -443,7 +570,8 @@ def parse_work(raw: dict) -> WorkRecord:
         venue=source.get("display_name"),
         venue_id=short_id(source["id"]) if source.get("id") else None,
         venue_type=source.get("type"),
-        authors=[name for name in authors if name],
+        authors=[name for name, _ in authorships],
+        author_ids=[short_id(author_id) if author_id else None for _, author_id in authorships],
         abstract=decode_abstract(raw.get("abstract_inverted_index")),
         cited_by_count=raw.get("cited_by_count"),
         percentile=percentile.get("value"),
