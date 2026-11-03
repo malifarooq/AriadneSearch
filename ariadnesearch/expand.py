@@ -31,7 +31,7 @@ Decision = Literal["accepted", "rejected", "read"]
 
 CITERS_MAX_AGE = timedelta(days=30)
 MAX_NEW_BY_OVERLAP = 300  # papers added per step for shared references or citers
-PER_PAPER_LIMIT = 10  # open suggestions each known paper may contribute
+PER_PAPER_LIMIT = 10  # suggestions each newly added paper brings in, once
 UPDATE_LOOKBACK = timedelta(days=14)  # OpenAlex adds some papers after their date
 UPDATE_CAP = 2000  # citing papers per update
 _DOI = re.compile(r"10\.\d{4,9}/\S+")
