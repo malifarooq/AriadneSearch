@@ -24,7 +24,7 @@ from ariadnesearch.journals import refresh_impact
 from ariadnesearch.prune import prune
 from ariadnesearch.topics import refresh_topics
 from ariadnesearch.mine import parse_bib, resolve_entries
-from ariadnesearch.openalex import MAX_OR_VALUES, OpenAlexClient
+from ariadnesearch.openalex import MAX_OR_VALUES, CiterOrder, OpenAlexClient
 from ariadnesearch.rank import KNOWN_STATES, load_snapshot, load_weights, rank
 from ariadnesearch.records import WorkRecord, arxiv_doi, normalize_doi
 
@@ -56,6 +56,16 @@ class UpdateReport:
     since: str
     citers_seen: int = 0
     new_papers: list[str] = field(default_factory=list)
+    capped: bool = False
+    cost_usd: float = 0.0
+
+
+@dataclass
+class CitersReport:
+    total: int = 0  # papers citing it in OpenAlex
+    stored: int = 0  # of those, stored here (newest first, up to the cap)
+    added: list[int] = field(default_factory=list)
+    already: int = 0  # stored citing papers already in the project
     capped: bool = False
     cost_usd: float = 0.0
 
@@ -225,9 +235,15 @@ def expand_citers(
     client: OpenAlexClient,
     work_id: int,
     cap: int = 500,
+    order: CiterOrder = "newest",
 ) -> tuple[int, bool]:
-    """Fetch citing papers. Return (number stored, whether the cap was reached)."""
-    if _citers_are_fresh(conn, work_id):
+    """Fetch citing papers. Return (number stored, whether the cap was reached).
+
+    Newest-first fetches are repeated once they are 30 days old. A most-cited
+    fetch always runs, its pages come from the cache, and it leaves that 30-day
+    clock alone so new citing papers keep arriving.
+    """
+    if order == "newest" and _citers_are_fresh(conn, work_id):
         row = conn.execute(
             "SELECT citers_total FROM fetch_state WHERE work_id = ?", (work_id,)
         ).fetchone()
@@ -236,8 +252,8 @@ def expand_citers(
     openalex_ids = _openalex_ids(conn, work_id)
     if not openalex_ids:
         return 0, False
-    records, total = client.fetch_citers(openalex_ids, cap)
-    now = utc_now()
+    records, total = client.fetch_citers(openalex_ids, cap, order=order)
+    now = utc_now() if order == "newest" else None
     for record in records:
         citer = upsert_work(conn, record)
         current = resolve(conn, "openalex", openalex_ids[0]) or work_id
@@ -250,7 +266,8 @@ def expand_citers(
         """
         INSERT INTO fetch_state(work_id, citers_total, citers_at) VALUES (?, ?, ?)
         ON CONFLICT(work_id) DO UPDATE SET
-            citers_total = excluded.citers_total, citers_at = excluded.citers_at
+            citers_total = excluded.citers_total,
+            citers_at = COALESCE(excluded.citers_at, fetch_state.citers_at)
         """,
         (work_id, total, now),
     )
@@ -522,6 +539,80 @@ def _finish_expand(
             "hydrated": report.hydrated,
             "citers_added": report.citers_added,
             "frontier_added": report.frontier_added,
+            "cost_usd": report.cost_usd,
+        },
+    )
+    conn.commit()
+    return report
+
+
+def add_citers(
+    conn: sqlite3.Connection,
+    client: OpenAlexClient,
+    project_id: int,
+    work_id: int,
+    limit: int | None = PER_PAPER_LIMIT,
+    citer_cap: int = 500,
+    order: CiterOrder = "newest",
+) -> CitersReport:
+    """Add the best papers citing one paper to the project, for review.
+
+    Up to `citer_cap` citing papers are fetched, the newest or the most cited by
+    `order`, which matters only when more papers than that cite it. Every stored
+    citing paper not yet in the project is scored like any suggestion, and the
+    best `limit` are added, or all of them with None. Asking again adds the next
+    best.
+    """
+    if conn.execute("SELECT 1 FROM work WHERE id = ?", (work_id,)).fetchone() is None:
+        raise NotFound(f"Unknown paper: {work_id}")
+    report = CitersReport()
+    spent_before = usage_today(conn, "openalex")[1]
+    openalex_ids = _openalex_ids(conn, work_id)
+    expand_citers(conn, client, work_id, citer_cap, order)
+    if openalex_ids:  # storing citing papers can merge this paper into another record
+        work_id = resolve(conn, "openalex", openalex_ids[0]) or work_id
+
+    citers = [row[0] for row in conn.execute("SELECT src FROM cites WHERE dst = ?", (work_id,))]
+    members = {
+        row[0]
+        for row in conn.execute(
+            "SELECT work_id FROM membership WHERE project_id = ?", (project_id,)
+        )
+    }
+    candidates = sorted(set(citers) - members)
+    report.stored = len(set(citers))
+    report.already = report.stored - len(candidates)
+    row = conn.execute(
+        "SELECT citers_total FROM fetch_state WHERE work_id = ?", (work_id,)
+    ).fetchone()
+    report.total = max(row["citers_total"] or 0, report.stored) if row else report.stored
+    report.capped = report.total > report.stored
+
+    if candidates and limit != 0:
+        snapshot, state = load_snapshot(conn, project_id, candidates=candidates)
+        scores = {
+            item.work_id: item.score
+            for item in rank(snapshot, state, load_weights(conn, project_id))
+        }
+        best = sorted(candidates, key=lambda candidate: (-scores.get(candidate, 0.0), candidate))
+        report.added = best if limit is None else best[:limit]
+        for citer in report.added:
+            add_member(conn, project_id, citer, "frontier")
+        conn.commit()
+        hydrate(conn, client, report.added)
+        refresh_impact(conn, client, report.added)
+        refresh_topics(conn, client, report.added)
+    prune(conn)
+
+    report.cost_usd = usage_today(conn, "openalex")[1] - spent_before
+    log_event(
+        conn,
+        project_id,
+        "citers",
+        {
+            "work_id": work_id,
+            "added": len(report.added),
+            "total": report.total,
             "cost_usd": report.cost_usd,
         },
     )

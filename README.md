@@ -97,6 +97,25 @@ labels appear as you zoom in, and hovering a paper dims everything not linked to
 
 The strip below the graph shows today's API use.
 
+## Papers citing one paper
+
+Select any paper, then press **Find citing papers** in the details panel and
+choose how many to add: the best 10, 25 or 50, or all. AriadneSearch fetches up to
+500 papers citing it, scores those not yet in the project like any suggestion, and
+adds the best to review. They are highlighted on the map, drawn even if they rank
+low, and listed under the button. Click empty space on the map to clear the
+highlight. Pressing it again adds the next best.
+
+For a paper cited more than 500 times, choose which 500 to fetch: **the newest**,
+or **the most cited**. Both kinds add up, and every stored citing paper is a
+candidate. The most-cited list changes slowly, so asking again within 30 days
+costs nothing. From the terminal:
+
+```bash
+ariadne citers PROJECT PAPER --add 25                # PAPER: an ID from `rank`, or a DOI
+ariadne citers PROJECT PAPER --add 25 --most-cited
+```
+
 ## Keeping a project current
 
 Press **Check new papers**, or run:
@@ -300,6 +319,7 @@ list, use **Export BibTeX**, or `ariadne export PROJECT --out refs.bib`.
 | `ariadne seed PROJECT DOI...` | Add seeds. Also takes `--bib` and `--mine` |
 | `ariadne expand PROJECT` | Add new papers' best neighbours (the Update graph button) |
 | `ariadne update PROJECT` | Add papers citing your known papers since the last run |
+| `ariadne citers PROJECT PAPER` | Add the best papers citing one paper. Also takes `--add N`, `--all` and `--most-cited` |
 | `ariadne rank PROJECT` | List suggestions. Also takes `--csv`, `--sort` and filters |
 | `ariadne decide PROJECT PAPER accepted` | Record a decision |
 | `ariadne export PROJECT --out refs.bib` | Export kept papers |

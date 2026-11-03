@@ -120,6 +120,15 @@ def test_update_lists_new_papers(run):
     assert "new to this project" in out
 
 
+def test_citers_adds_citing_papers(run):
+    run("project", "readout")
+    run("seed", "readout", "10.1109/seed.1")
+    code, out, _ = run("citers", "readout", "10.1109/seed.1", "--add", "2")
+    assert code == 0
+    assert "3 papers cite it" in out and "Added 2 to review" in out
+    assert run("citers", "readout", "10.9999/none")[0] == 1
+
+
 def test_decide_accepts_a_doi(run):
     run("project", "p")
     run("seed", "p", "10.1109/seed.1")

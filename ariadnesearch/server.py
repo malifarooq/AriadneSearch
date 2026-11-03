@@ -28,6 +28,7 @@ from ariadnesearch.errors import (
 from ariadnesearch.expand import add_seeds as add_project_seeds
 from ariadnesearch.expand import (
     PER_PAPER_LIMIT,
+    add_citers,
     expand_project,
     pending_count,
     record_decision,
@@ -61,6 +62,11 @@ class SeedRequest(BaseModel):
 class ExpandRequest(BaseModel):
     top_k: int = Field(default=20, ge=0, le=200)
     per_paper: int | None = Field(default=PER_PAPER_LIMIT, ge=1, le=100)  # None: all
+
+
+class CitersRequest(BaseModel):
+    limit: int | None = Field(default=PER_PAPER_LIMIT, ge=1, le=500)  # None: all
+    order: Literal["newest", "most_cited"] = "newest"  # which to fetch past the cap
 
 
 class DecisionRequest(BaseModel):
@@ -226,6 +232,24 @@ def expand(
     return asdict(report)
 
 
+@app.post("/api/projects/{project_id}/works/{work_id}/citers")
+def citers(
+    project_id: int,
+    work_id: int,
+    body: CitersRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
+    client: OpenAlexClient = Depends(get_client),
+) -> dict:
+    """Add the best papers citing one paper to the project, for review."""
+    _require_project(conn, project_id)
+    config = load_config()
+    return asdict(
+        add_citers(
+            conn, client, project_id, work_id, body.limit, config.citer_cap, body.order
+        )
+    )
+
+
 @app.post("/api/projects/{project_id}/update")
 def update(
     project_id: int,
@@ -273,11 +297,18 @@ def graph(
     mode: views.GraphMode = "all",
     min_year: int | None = None,
     added_only: bool = False,
+    include: str = "",
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict:
-    """Return graph nodes and edges, with saved positions."""
+    """Return graph nodes and edges, with saved positions.
+
+    `include` is a comma-separated list of paper IDs to draw whatever their rank.
+    """
     _require_project(conn, project_id)
-    return views.graph_view(conn, project_id, limit, "added" if added_only else mode, min_year)
+    extra = [int(item) for item in include.split(",") if item.strip().isdigit()]
+    return views.graph_view(
+        conn, project_id, limit, "added" if added_only else mode, min_year, extra
+    )
 
 
 @app.get("/api/projects/{project_id}/search")

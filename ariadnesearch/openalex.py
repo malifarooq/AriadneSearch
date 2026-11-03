@@ -19,6 +19,7 @@ import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from typing import Literal
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -64,6 +65,8 @@ SELECT_FIELDS = ",".join(
         "primary_topic",
     ]
 )
+CiterOrder = Literal["newest", "most_cited"]
+CITER_SORTS = {"newest": "publication_date:desc", "most_cited": "cited_by_count:desc"}
 _ARXIV_URL = re.compile(
     r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}|[a-z.\-]+/[0-9]{7})", re.IGNORECASE
 )
@@ -204,9 +207,12 @@ class OpenAlexClient:
         self.conn.commit()
 
     def _fetch_all(
-        self, path: str, params: dict, cap: int
+        self, path: str, params: dict, cap: int, cached: bool = False
     ) -> tuple[list[dict], int]:
-        """Follow cursor pages up to `cap` results. Return (results, total)."""
+        """Follow cursor pages up to `cap` results. Return (results, total).
+
+        Pages are fetched fresh unless `cached`, for lists that barely change.
+        """
         results: list[dict] = []
         total = 0
         cursor: str | None = "*"
@@ -216,7 +222,7 @@ class OpenAlexClient:
                 "per_page": min(MAX_PER_PAGE, cap - len(results)),
                 "cursor": cursor,
             }
-            body = self.get_json(path, page_params, read_cache=False) or {}
+            body = self.get_json(path, page_params, read_cache=cached) or {}
             meta = body.get("meta") or {}
             total = int(meta.get("count") or total)
             page = body.get("results") or []
@@ -277,11 +283,17 @@ class OpenAlexClient:
         return records
 
     def fetch_citers(
-        self, openalex_ids: list[str], cap: int, since: date | None = None
+        self,
+        openalex_ids: list[str],
+        cap: int,
+        since: date | None = None,
+        order: CiterOrder = "newest",
     ) -> tuple[list[WorkRecord], int]:
-        """Return up to `cap` citing works, newest first, and the total count.
+        """Return up to `cap` citing works and the total count.
 
-        With `since`, only works published on or after that date are returned.
+        `order` picks which come first: the newest, or the most cited. The most
+        cited change slowly, so those pages are cached. With `since`, only works
+        published on or after that date are returned.
         """
         filter_value = "cites:" + "|".join(short_id(item) for item in openalex_ids)
         if since:
@@ -290,10 +302,11 @@ class OpenAlexClient:
             "/works",
             {
                 "filter": filter_value,
-                "sort": "publication_date:desc",
+                "sort": CITER_SORTS[order],
                 "select": SELECT_FIELDS,
             },
             cap,
+            cached=order == "most_cited",
         )
         return [parse_work(item) for item in results], total
 

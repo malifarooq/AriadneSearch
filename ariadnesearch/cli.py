@@ -19,6 +19,7 @@ from ariadnesearch.prune import prune
 from ariadnesearch.errors import AriadneError, NotFound
 from ariadnesearch.expand import (
     PER_PAPER_LIMIT,
+    add_citers,
     UPDATE_CAP,
     add_seeds,
     add_seeds_from_bib,
@@ -229,6 +230,37 @@ def cmd_expand(args: argparse.Namespace) -> int:
     )
     if report.cap_hit:
         print(f"citer cap reached on {len(report.cap_hit)} papers")
+    return 0
+
+
+def cmd_citers(args: argparse.Namespace) -> int:
+    with open_app() as app:
+        project_id = get_project_id(app.conn, args.project)
+        work_id = _paper_id(app.conn, args.paper)
+        if work_id is None:
+            raise NotFound(f"No paper with the ID or DOI {args.paper}.")
+        report = add_citers(
+            app.conn,
+            app.client,
+            project_id,
+            work_id,
+            None if args.all else args.add,
+            app.config.citer_cap,
+            "most_cited" if args.most_cited else "newest",
+        )
+        summaries = views.work_summaries(app.conn, report.added)
+    print(
+        f"{report.total} papers cite it in OpenAlex, {report.stored} stored, "
+        f"{report.already} already in the project. Added {len(report.added)} to review, "
+        f"cost ${report.cost_usd:.4f}"
+    )
+    if report.capped:
+        order = "most cited" if args.most_cited else "newest"
+        print(f"{report.stored} of them are stored, fetched {order} first")
+    for work_id in report.added:
+        summary = summaries.get(work_id) or {}
+        title = (summary.get("title") or "Untitled")[:80]
+        print(f"{work_id:>8}  {summary.get('year') or '':>4}  {title}")
     return 0
 
 
@@ -561,6 +593,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="suggestions each newly added paper brings in, 0 for every neighbour",
     )
     p.set_defaults(handler=cmd_expand)
+
+    p = commands.add_parser("citers", help="add the best papers citing one paper")
+    p.add_argument("project")
+    p.add_argument("paper", help="paper ID from `rank`, or a DOI")
+    p.add_argument("--add", type=int, default=PER_PAPER_LIMIT, help="how many to add")
+    p.add_argument("--all", action="store_true", help="add every citing paper")
+    p.add_argument(
+        "--most-cited",
+        action="store_true",
+        help="past 500 citing papers, fetch the most cited instead of the newest",
+    )
+    p.set_defaults(handler=cmd_citers)
 
     p = commands.add_parser("update", help="add new papers citing your known papers")
     p.add_argument("project")

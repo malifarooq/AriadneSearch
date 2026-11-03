@@ -6,6 +6,7 @@ from conftest import FakeOpenAlex, make_client, small_field, work
 from ariadnesearch.db import usage_today
 from ariadnesearch.errors import BadInput, NotFound
 from ariadnesearch.expand import (
+    add_citers,
     add_seeds,
     add_seeds_from_bib,
     expand_citers,
@@ -288,3 +289,43 @@ def test_update_adds_at_most_the_limit_per_known_paper(conn, client, fake, proje
     report = update_project(conn, client, project, per_paper=3)
     assert report.citers_seen == 10
     assert len(report.new_papers) == 3
+
+
+def test_add_citers_adds_the_best_citing_papers_then_the_next(conn, client, project):
+    seed_both(conn, client, project)
+    seed = resolve(conn, "doi", "10.1109/seed.1")
+    first = add_citers(conn, client, project, seed, limit=1)
+    assert first.stored == 3 and first.total == 3  # papers 20, 21 and 22 cite it
+    assert len(first.added) == 1
+    second = add_citers(conn, client, project, seed, limit=1)
+    assert second.already == 1 and len(second.added) == 1
+    assert second.added != first.added
+    rest = add_citers(conn, client, project, seed, limit=None)
+    assert len(rest.added) == 1
+    assert members(conn, project, "frontier") >= {"W20", "W21", "W22"}
+    assert add_citers(conn, client, project, seed).added == []
+
+
+def test_add_citers_needs_a_known_paper(conn, client, project):
+    with pytest.raises(NotFound):
+        add_citers(conn, client, project, 999999)
+
+
+def test_citers_can_be_fetched_most_cited_first(conn, client, fake, project):
+    add_seeds(conn, client, project, ["10.1109/seed.1"])
+    seed = resolve(conn, "doi", "10.1109/seed.1")
+    # Papers 20, 21 and 22 cite it. With room for two, the most cited are 20 and 21.
+    top = add_citers(conn, client, project, seed, limit=None, citer_cap=2, order="most_cited")
+    assert members(conn, project, "frontier") == {"W20", "W21"}
+    assert top.capped and top.total == 3
+    clock = conn.execute("SELECT citers_at FROM fetch_state WHERE work_id = ?", (seed,)).fetchone()
+    assert clock["citers_at"] is None  # newest-first fetches are still due
+
+    citer_calls = lambda: sum("cites:" in dict(call.params).get("filter", "") for call in fake.calls)  # noqa: E731
+    calls = citer_calls()
+    add_citers(conn, client, project, seed, limit=None, citer_cap=2, order="most_cited")
+    assert citer_calls() == calls  # the most-cited list comes from the cache
+
+    newest = add_citers(conn, client, project, seed, limit=None, citer_cap=2, order="newest")
+    assert members(conn, project, "frontier") == {"W20", "W21", "W22"}
+    assert not newest.capped

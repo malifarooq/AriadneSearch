@@ -149,6 +149,28 @@ def test_suggestions_sort_and_filter_by_journal_impact(api):
     assert none["items"] == []
 
 
+def test_find_citing_papers_from_the_details_panel(api):
+    project_id = api.post("/api/projects", json={"name": "citers"}).json()["id"]
+    api.post(f"/api/projects/{project_id}/seeds", json={"identifiers": ["10.1109/seed.1"]})
+    seed = api.get(f"/api/projects/{project_id}/added").json()["items"][0]["id"]
+    report = api.post(f"/api/projects/{project_id}/works/{seed}/citers", json={"limit": 2}).json()
+    assert len(report["added"]) == 2 and report["total"] == 3
+    frontier = api.get(f"/api/projects/{project_id}/frontier").json()["items"]
+    assert set(report["added"]) <= {item["id"] for item in frontier}
+
+    include = ",".join(str(item) for item in report["added"])
+    nodes = api.get(f"/api/projects/{project_id}/graph", params={"limit": 1, "include": include}).json()["nodes"]
+    assert set(report["added"]) <= {node["id"] for node in nodes}
+    assert api.post(f"/api/projects/{project_id}/works/999999/citers", json={}).status_code == 404
+    assert api.post(f"/api/projects/{project_id}/works/{seed}/citers", json={"limit": 0}).status_code == 422
+    most = api.post(
+        f"/api/projects/{project_id}/works/{seed}/citers", json={"limit": 5, "order": "most_cited"}
+    )
+    assert most.status_code == 200 and len(most.json()["added"]) == 1  # the third citing paper
+    bad = api.post(f"/api/projects/{project_id}/works/{seed}/citers", json={"order": "hottest"})
+    assert bad.status_code == 422
+
+
 def test_health_reports_key_presence_without_values(api):
     response = api.get("/api/health")
     body = response.json()

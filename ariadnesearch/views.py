@@ -356,8 +356,12 @@ def graph_view(
     limit: int = 200,
     mode: GraphMode = "all",
     min_year: int | None = None,
+    include: list[int] | None = None,
 ) -> dict:
     """Return graph nodes and edges, with saved positions and importance fields.
+
+    `include` lists project papers to draw whatever their rank, such as citing
+    papers just added for review.
 
     Modes: "all" shows added papers and the best suggestions, "added" shows only
     seeds, accepted and read papers, and "recent" shows papers from `min_year` on.
@@ -394,6 +398,8 @@ def graph_view(
         suggested = list(scores)
     known = known[:limit]
     visible = known + suggested[: max(limit - len(known), 0)]
+    shown = set(visible)
+    visible += [work_id for work_id in include or [] if work_id in members and work_id not in shown]
 
     summaries = work_summaries(conn, visible)
     flags = annotate(conn, visible)

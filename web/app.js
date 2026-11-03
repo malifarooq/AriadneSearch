@@ -36,6 +36,7 @@ const state = {
   authorOpen: null,
   searchResults: [],
   searchActive: -1,
+  justAdded: [], // citing papers added from the details panel, drawn whatever their rank
 };
 
 function el(tag, attrs = {}, ...children) {
@@ -179,6 +180,7 @@ async function switchProject(id) {
   state.selectedId = null;
   state.positions.clear();
   state.categorySlots = new Map();
+  state.justAdded = [];
   storeProject(id);
   renderDetailsEmpty();
   await refresh();
@@ -849,6 +851,12 @@ function initGraph() {
     .linkDirectionalArrowRelPos(1)
     .linkDirectionalArrowColor((link) => (linkIsLit(link) ? state.palette.ink : withAlpha(state.palette.pencil, 0.4)))
     .onRenderFramePost(drawLabels)
+    .onBackgroundClick(() => {
+      if (state.highlight && !$("graph-search").value) {
+        state.highlight = null; // clears a highlight from the key, an author or new papers
+        redraw();
+      }
+    })
     .onNodeClick((node) => selectPaper(node.id))
     .onNodeHover((node) => {
       state.hoverId = node ? node.id : null;
@@ -895,6 +903,7 @@ function padMessage(nodes) {
 
 function graphQuery() {
   const params = new URLSearchParams({ limit: GRAPH_LIMIT });
+  if (state.justAdded.length) params.set("include", state.justAdded.join(","));
   if (state.listMode === "added") params.set("mode", "added");
   if (state.listMode === "recent") {
     params.set("mode", "recent");
@@ -1268,13 +1277,93 @@ async function selectPaper(workId) {
         el("p", {}, `Cited by ${plural(work.cited_by ?? 0, "paper")} in OpenAlex.`),
         work.level !== "stub" && !work.n_refs
           ? el("p", { class: "muted" }, "OpenAlex has no reference list for this paper.")
-          : null
+          : null,
+        citersControls(work)
       ),
       ieeeSection(work),
       detailLinks(work),
     ];
     $("paper-details").replaceChildren(...sections.filter(Boolean));
   });
+}
+
+/* Papers citing one paper */
+
+const CITER_CHOICES = [["10", "best 10"], ["25", "best 25"], ["50", "best 50"], ["all", "all"]];
+const CITER_ORDERS = [["newest", "of the newest"], ["most_cited", "of the most cited"]];
+
+function citersControls(work) {
+  const result = el("div", { class: "citers-result" });
+  const count = el(
+    "select",
+    { "aria-label": "How many citing papers to add" },
+    ...CITER_CHOICES.map(([value, label]) => el("option", { value }, label))
+  );
+  const order = el(
+    "select",
+    { "aria-label": "Which citing papers to fetch when there are more than 500" },
+    ...CITER_ORDERS.map(([value, label]) => el("option", { value }, label))
+  );
+  const button = el("button", { type: "button" }, "Find citing papers");
+  button.addEventListener("click", () =>
+    attempt(() => findCiters(work, count.value, order.value, button, result))
+  );
+  return el(
+    "div",
+    { class: "citers" },
+    el("div", { class: "citers-row" }, button, el("span", { class: "muted" }, "add"), count, order),
+    el(
+      "p",
+      { class: "muted" },
+      "Fetches up to 500 papers citing this one, the newest or the most cited, then adds the best not yet in the project to review. Asking again adds the next best."
+    ),
+    result
+  );
+}
+
+async function findCiters(work, choice, order, button, result) {
+  button.disabled = true;
+  button.textContent = "Finding...";
+  say(`Looking for papers citing ${plain(work.title)}...`);
+  try {
+    const body = { limit: choice === "all" ? null : Number(choice), order };
+    const report = await api(projectPath(`/works/${work.id}/citers`), body);
+    const parts = [];
+    if (!report.stored) {
+      parts.push("OpenAlex lists no papers citing it yet.");
+    } else {
+      parts.push(`Added ${plural(report.added.length, "citing paper")} to review.`);
+      if (report.already) parts.push(`${report.already} were already in the project.`);
+      if (report.capped) {
+        parts.push(`OpenAlex lists ${report.total}, and ${report.stored} of them are stored and were checked.`);
+      }
+      if (report.added.length) parts.push("They are highlighted on the map. Click empty space to clear.");
+    }
+    parts.push(`Cost $${report.cost_usd.toFixed(4)}.`);
+
+    state.justAdded = [...new Set([...state.justAdded, ...report.added])];
+    if (state.listMode === "added" || state.listMode === "authors") await setListMode("suggestions");
+    await refresh();
+    state.highlight = report.added.length ? new Set([work.id, ...report.added]) : null;
+    redraw();
+    renderAddedCiters(report.added, result);
+    say(parts.join(" "));
+  } finally {
+    button.disabled = false;
+    button.textContent = "Find citing papers";
+  }
+}
+
+function renderAddedCiters(ids, result) {
+  const nodes = new Map((state.graph?.graphData().nodes || []).map((node) => [node.id, node]));
+  const rows = ids.map((id) => {
+    const node = nodes.get(id);
+    const label = node ? `${node.label}: ${plain(node.title)}` : `Paper ${id}`;
+    return el("li", {}, el("button", { type: "button", class: "link-button", onclick: () => selectPaper(id) }, label));
+  });
+  result.replaceChildren(
+    ...(rows.length ? [el("p", {}, "Added to review:"), el("ul", { class: "author-papers" }, ...rows)] : [])
+  );
 }
 
 /* Actions */
