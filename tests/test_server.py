@@ -242,11 +242,16 @@ def test_decisions_change_the_frontier(api):
     ids = [item["id"] for item in api.get(f"/api/projects/{project_id}/frontier").json()["items"]]
     assert first["id"] not in ids
 
-    bad = api.post(
+    unknown = api.post(
+        f"/api/projects/{project_id}/decisions",
+        json={"work_id": 999999, "decision": "rejected"},
+    )
+    assert unknown.status_code == 404
+    malformed = api.post(
         f"/api/projects/{project_id}/decisions",
         json={"work_id": "missing", "decision": "rejected"},
     )
-    assert bad.status_code == 404
+    assert malformed.status_code == 422
 
 
 def test_graph_has_nodes_and_edges_within_the_limit(api):

@@ -253,6 +253,29 @@ python eval/loo.py temporal
 python eval/sweep.py refs.bib       # the full weight comparison behind `ariadne tune`
 ```
 
+## Storage
+
+Everything lives in the `data/` folder:
+
+- `graph.db`: papers, citation links, projects and your decisions.
+- `cache.db`: recent OpenAlex responses. Safe to delete at any time.
+- `ieee.db`: IEEE details you asked for.
+
+Most stored papers are placeholders, known only because a fetched paper cites
+them. After each update, AriadneSearch deletes placeholders that can never become
+suggestions: those cited by just one paper that is in no project. If that paper
+joins a project later, its reference list is fetched again. Cache entries older
+than 30 days are deleted at the same time. Deleted space is reused, so the files
+stop growing quickly. To shrink them on disk, run:
+
+```bash
+ariadne prune --vacuum
+```
+
+A database from an earlier version is upgraded the first time AriadneSearch
+starts, after any running server has been stopped. The old file is kept as
+`data/graph.v1-backup.db`, and can be deleted once everything looks right.
+
 ## Sharing and collaboration
 
 Each person runs their own copy with their own keys in `.env`. API keys belong to
@@ -281,6 +304,7 @@ list, use **Export BibTeX**, or `ariadne export PROJECT --out refs.bib`.
 | `ariadne decide PROJECT PAPER accepted` | Record a decision |
 | `ariadne export PROJECT --out refs.bib` | Export kept papers |
 | `ariadne tune PROJECT` | Fit the ranking weights to the project's seeds |
+| `ariadne prune --vacuum` | Remove unreachable placeholders and shrink the files |
 | `ariadne refs PAPER --citations FILE` | Give a paper the reference list OpenAlex lacks |
 | `ariadne mine sync` | Import your published papers' citations |
 | `ariadne mine draft TITLE --citations FILE` | Save a draft's citations as a list |
@@ -300,6 +324,8 @@ each push.
 
 | File | Job |
 |---|---|
+| `ariadnesearch/db.py` | Database setup, layout version and upgrades |
+| `ariadnesearch/prune.py` | Removal of placeholders that can never be suggested |
 | `ariadnesearch/openalex.py` | OpenAlex client, cache and budget guard |
 | `ariadnesearch/identity.py` | Duplicate detection and reversible merges |
 | `ariadnesearch/expand.py` | Graph growth within the API budget |

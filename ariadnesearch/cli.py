@@ -14,8 +14,9 @@ from pathlib import Path
 
 from ariadnesearch import mine, references, tune, views
 from ariadnesearch.config import Config, load_config
-from ariadnesearch.db import create_project, get_project_id, init_db
-from ariadnesearch.errors import AriadneError
+from ariadnesearch.db import cache_path, create_project, get_project_id, init_db
+from ariadnesearch.prune import prune
+from ariadnesearch.errors import AriadneError, NotFound
 from ariadnesearch.expand import (
     PER_PAPER_LIMIT,
     UPDATE_CAP,
@@ -69,6 +70,12 @@ def open_app() -> Iterator[App]:
     finally:
         client.http.close()
         conn.close()
+
+
+def _paper_id(conn: sqlite3.Connection, paper: str) -> int | None:
+    """Read a paper ID as `rank` prints it, or a DOI."""
+    paper = paper.strip()
+    return int(paper) if paper.isdigit() else resolve(conn, "doi", normalize_doi(paper))
 
 
 def _print_unresolved(items: list[str]) -> None:
@@ -248,7 +255,22 @@ def cmd_update(args: argparse.Namespace) -> int:
     for item in ranked:
         summary = summaries.get(item.work_id) or {}
         title = (summary.get("title") or "Untitled")[:78]
-        print(f"{item.score:7.3f}  {item.work_id}  {summary.get('year') or '':>4}  {title}")
+        print(f"{item.score:7.3f}  {item.work_id:>8}  {summary.get('year') or '':>4}  {title}")
+    return 0
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    with open_app() as app:
+        files = [app.config.graph_db, cache_path(app.config.graph_db)]
+        before = sum(path.stat().st_size for path in files if path.exists())
+        report = prune(app.conn, vacuum=args.vacuum)
+        after = sum(path.stat().st_size for path in files if path.exists())
+    print(
+        f"removed {report.papers} placeholder papers, {report.links} links and "
+        f"{report.cache_entries} expired cache entries"
+    )
+    if args.vacuum:
+        print(f"database files: {before / 2**20:.1f} MB before, {after / 2**20:.1f} MB after")
     return 0
 
 
@@ -279,7 +301,7 @@ def cmd_refs(args: argparse.Namespace) -> int:
         print("Give --citations FILE or --arxiv.", file=sys.stderr)
         return 2
     with open_app() as app:
-        work_id = resolve(app.conn, "doi", normalize_doi(args.paper)) or args.paper
+        work_id = _paper_id(app.conn, args.paper)
         if not app.conn.execute("SELECT 1 FROM work WHERE id = ?", (work_id,)).fetchone():
             print(f"error: unknown paper {args.paper}. Add it as a seed first.", file=sys.stderr)
             return 1
@@ -330,7 +352,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
         )
     items = view["items"]
     print(f"{len(items)} shown of {view['matching']} matching")
-    print(f"{'score':>7}  {'id':<16}   CORE  2y-IF  paper")
+    print(f"{'score':>7}  {'id':>8}   CORE  2y-IF  paper")
     for item in items:
         rank = item["rank"]["rank"] if item["rank"] else "-"
         rank = rank if rank in RANK_ORDER or rank == "-" else "other"  # e.g. National
@@ -339,7 +361,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
         cited = " [cited by me]" if item["mine"]["cited_by_me"] else ""
         title = (item["title"] or "Untitled")[:72]
         print(
-            f"{item['score']:7.3f}  {item['id']}  {rank:>5}  {impact_text:>5}  "
+            f"{item['score']:7.3f}  {item['id']:>8}  {rank:>5}  {impact_text:>5}  "
             f"{item['label']}: {title}{cited}"
         )
     if args.csv:
@@ -375,7 +397,9 @@ def cmd_rank(args: argparse.Namespace) -> int:
 def cmd_decide(args: argparse.Namespace) -> int:
     with open_app() as app:
         project_id = get_project_id(app.conn, args.project)
-        work_id = resolve(app.conn, "doi", normalize_doi(args.paper)) or args.paper
+        work_id = _paper_id(app.conn, args.paper)
+        if work_id is None:
+            raise NotFound(f"No paper with the ID or DOI {args.paper}.")
         record_decision(app.conn, project_id, work_id, args.decision)
     print(f"{args.paper}: {args.decision}")
     return 0
@@ -552,6 +576,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-k", type=int, default=15, help="new papers to list")
     p.set_defaults(handler=cmd_update)
+
+    p = commands.add_parser("prune", help="remove stored papers that can never be suggested")
+    p.add_argument("--vacuum", action="store_true", help="also shrink the database files")
+    p.set_defaults(handler=cmd_prune)
 
     p = commands.add_parser("tune", help="fit a project's ranking weights to its seeds")
     p.add_argument("project")

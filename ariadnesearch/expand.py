@@ -21,6 +21,7 @@ from ariadnesearch.db import chunks, log_event, usage_today, utc_now
 from ariadnesearch.errors import BadInput, NotFound
 from ariadnesearch.identity import best_title_match, resolve, upsert_work
 from ariadnesearch.journals import refresh_impact
+from ariadnesearch.prune import prune
 from ariadnesearch.topics import refresh_topics
 from ariadnesearch.mine import parse_bib, resolve_entries
 from ariadnesearch.openalex import MAX_OR_VALUES, OpenAlexClient
@@ -88,7 +89,7 @@ def resolve_identifier(
 
 
 def add_member(
-    conn: sqlite3.Connection, project_id: int, work_id: str, state: str
+    conn: sqlite3.Connection, project_id: int, work_id: int, state: str
 ) -> bool:
     """Add a paper to a project. Seeds replace a frontier state, and nothing else does."""
     cursor = conn.execute(
@@ -170,7 +171,7 @@ def add_work_ids_as_seeds(
     conn.commit()
 
 
-def _openalex_ids(conn: sqlite3.Connection, work_id: str) -> list[str]:
+def _openalex_ids(conn: sqlite3.Connection, work_id: int) -> list[str]:
     rows = conn.execute(
         "SELECT value FROM work_alias WHERE work_id = ? AND scheme = 'openalex'",
         (work_id,),
@@ -179,9 +180,14 @@ def _openalex_ids(conn: sqlite3.Connection, work_id: str) -> list[str]:
 
 
 def hydrate(
-    conn: sqlite3.Connection, client: OpenAlexClient, work_ids: list[str]
+    conn: sqlite3.Connection, client: OpenAlexClient, work_ids: list[int]
 ) -> int:
-    """Fetch metadata and references for stubs. Return the number hydrated."""
+    """Fetch metadata and references for stubs. Return the number fetched.
+
+    Papers whose stored reference list is shorter than OpenAlex's count are
+    fetched again too, because pruning may have removed references they share
+    with no one else. That costs one list call per 100 papers.
+    """
     stubs: list[str] = []
     for chunk in chunks(work_ids, 500):
         marks = ",".join("?" * len(chunk))
@@ -189,7 +195,10 @@ def hydrate(
             f"""
             SELECT a.value FROM work w
             JOIN work_alias a ON a.work_id = w.id AND a.scheme = 'openalex'
-            WHERE w.level = 'stub' AND w.id IN ({marks})
+            WHERE w.id IN ({marks}) AND (
+                w.level = 'stub'
+                OR COALESCE(w.n_refs, 0) > (SELECT COUNT(*) FROM cites c WHERE c.src = w.id)
+            )
             """,
             chunk,
         )
@@ -201,7 +210,7 @@ def hydrate(
     return len(records)
 
 
-def _citers_are_fresh(conn: sqlite3.Connection, work_id: str) -> bool:
+def _citers_are_fresh(conn: sqlite3.Connection, work_id: int) -> bool:
     row = conn.execute(
         "SELECT citers_at FROM fetch_state WHERE work_id = ?", (work_id,)
     ).fetchone()
@@ -214,7 +223,7 @@ def _citers_are_fresh(conn: sqlite3.Connection, work_id: str) -> bool:
 def expand_citers(
     conn: sqlite3.Connection,
     client: OpenAlexClient,
-    work_id: str,
+    work_id: int,
     cap: int = 500,
 ) -> tuple[int, bool]:
     """Fetch citing papers. Return (number stored, whether the cap was reached)."""
@@ -234,8 +243,7 @@ def expand_citers(
         current = resolve(conn, "openalex", openalex_ids[0]) or work_id
         if citer != current:
             conn.execute(
-                "INSERT OR IGNORE INTO cites(src, dst, first_seen) VALUES (?, ?, ?)",
-                (citer, current, now),
+                "INSERT OR IGNORE INTO cites(src, dst) VALUES (?, ?)", (citer, current)
             )
     work_id = resolve(conn, "openalex", openalex_ids[0]) or work_id
     conn.execute(
@@ -322,7 +330,7 @@ def _add_by_overlap(
     return added
 
 
-def _neighbours(conn: sqlite3.Connection, work_id: str) -> set[str]:
+def _neighbours(conn: sqlite3.Connection, work_id: int) -> set[int]:
     """Return a paper's references and stored citers, plus papers sharing at least
     two citers or two references with it."""
     rows = conn.execute(
@@ -390,7 +398,7 @@ def _populate(
             item.work_id: item.score
             for item in rank(snapshot, state, load_weights(conn, project_id))
         }
-        def best_first(work_id: str) -> tuple[float, str]:
+        def best_first(work_id: int) -> tuple[float, int]:
             return -scores.get(work_id, 0.0), work_id
 
         for linked in neighbours.values():
@@ -449,7 +457,7 @@ def expand_project(
     spent_before = usage_today(conn, "openalex")[1]
     titles_capped: list[str] = []
 
-    def fetch(work_id: str) -> None:
+    def fetch(work_id: int) -> None:
         added, capped = expand_citers(conn, client, work_id, citer_cap)
         report.citers_added += added
         report.papers_expanded += 1 if added else 0
@@ -503,6 +511,7 @@ def _finish_expand(
     members = known + _frontier_ids(conn, project_id)
     refresh_impact(conn, client, members)
     refresh_topics(conn, client, members)
+    prune(conn)
     report.cap_hit = sorted(set(titles_capped))
     report.cost_usd = usage_today(conn, "openalex")[1] - spent_before
     log_event(
@@ -582,6 +591,7 @@ def update_project(
         report.new_papers = _populate(conn, project_id, per_paper, only=fetched)
     conn.commit()
     refresh_impact(conn, client, report.new_papers)
+    prune(conn)
 
     report.cost_usd = usage_today(conn, "openalex")[1] - spent_before
     log_event(
@@ -602,7 +612,7 @@ def update_project(
 def record_decision(
     conn: sqlite3.Connection,
     project_id: int,
-    work_id: str,
+    work_id: int,
     decision: Decision,
 ) -> None:
     """Update `membership` and append the decision to `event`."""

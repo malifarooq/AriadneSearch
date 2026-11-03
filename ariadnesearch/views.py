@@ -146,7 +146,7 @@ def frontier_view(
     ranks = ranks_for_works(conn, ids)
     impact = impact_for_works(conn, ids)
 
-    def journal_impact(work_id: str) -> float:
+    def journal_impact(work_id: int) -> float:
         found = impact.get(work_id)
         return found.mean_citedness or 0.0 if found else -1.0  # -1: not a journal
 
@@ -385,7 +385,7 @@ def graph_view(
             for item in rank(snapshot, state, load_weights(conn, project_id))
         }
     if mode == "recent":
-        def recent(work_id: str) -> bool:
+        def recent(work_id: int) -> bool:
             return (snapshot.year.get(work_id) or 0) >= (min_year or 0)
 
         known = [work_id for work_id in known if recent(work_id)]
@@ -475,7 +475,7 @@ def save_positions(
     conn.commit()
 
 
-def work_view(conn: sqlite3.Connection, project_id: int, work_id: str) -> dict:
+def work_view(conn: sqlite3.Connection, project_id: int, work_id: int) -> dict:
     """Return full details for one paper."""
     row = conn.execute("SELECT * FROM work WHERE id = ?", (work_id,)).fetchone()
     if row is None:

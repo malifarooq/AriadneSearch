@@ -9,7 +9,6 @@ from __future__ import annotations
 import difflib
 import json
 import sqlite3
-import uuid
 from typing import Literal
 
 from ariadnesearch.db import chunks, utc_now
@@ -59,11 +58,7 @@ _MOVED_ROWS = [
 ]
 
 
-def new_work_id() -> str:
-    return f"w{uuid.uuid4().hex[:15]}"
-
-
-def resolve(conn: sqlite3.Connection, scheme: str, value: str) -> str | None:
+def resolve(conn: sqlite3.Connection, scheme: str, value: str) -> int | None:
     """Return the internal work ID for an external identifier."""
     row = conn.execute(
         "SELECT work_id FROM work_alias WHERE scheme = ? AND value = ?",
@@ -74,9 +69,9 @@ def resolve(conn: sqlite3.Connection, scheme: str, value: str) -> str | None:
 
 def resolve_many(
     conn: sqlite3.Connection, scheme: str, values: list[str]
-) -> dict[str, str]:
+) -> dict[str, int]:
     """Return {identifier: internal ID} for the identifiers already known."""
-    found: dict[str, str] = {}
+    found: dict[str, int] = {}
     for chunk in chunks(values, 500):
         marks = ",".join("?" * len(chunk))
         rows = conn.execute(
@@ -88,7 +83,7 @@ def resolve_many(
     return found
 
 
-def add_alias(conn: sqlite3.Connection, scheme: str, value: str, work_id: str) -> None:
+def add_alias(conn: sqlite3.Connection, scheme: str, value: str, work_id: int) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO work_alias(scheme, value, work_id) VALUES (?, ?, ?)",
         (scheme, value, work_id),
@@ -97,11 +92,19 @@ def add_alias(conn: sqlite3.Connection, scheme: str, value: str, work_id: str) -
 
 def upsert_stubs(
     conn: sqlite3.Connection, openalex_ids: list[str]
-) -> dict[str, str]:
+) -> dict[str, int]:
     """Record papers known only from a reference list. This costs no API call."""
     unique = list(dict.fromkeys(openalex_ids))
     known = resolve_many(conn, "openalex", unique)
-    new = {item: new_work_id() for item in unique if item not in known}
+    missing = [item for item in unique if item not in known]
+    if not missing:
+        return known
+    # Reserve a block of IDs. The write transaction keeps other writers out
+    # until it commits, so no one else can take the same block.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    start = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM work").fetchone()[0]
+    new = {item: start + offset for offset, item in enumerate(missing)}
     conn.executemany(
         "INSERT INTO work(id, level) VALUES (?, 'stub')",
         [(work_id,) for work_id in new.values()],
@@ -115,14 +118,13 @@ def upsert_stubs(
 
 
 def store_references(
-    conn: sqlite3.Connection, work_id: str, openalex_ids: list[str]
+    conn: sqlite3.Connection, work_id: int, openalex_ids: list[str]
 ) -> None:
     """Store a paper's outgoing citation edges."""
     targets = upsert_stubs(conn, openalex_ids)
-    now = utc_now()
     conn.executemany(
-        "INSERT OR IGNORE INTO cites(src, dst, first_seen) VALUES (?, ?, ?)",
-        [(work_id, dst, now) for dst in set(targets.values()) if dst != work_id],
+        "INSERT OR IGNORE INTO cites(src, dst) VALUES (?, ?)",
+        [(work_id, dst) for dst in set(targets.values()) if dst != work_id],
     )
 
 
@@ -150,7 +152,7 @@ def _row_to_record(row: sqlite3.Row) -> WorkRecord:
     )
 
 
-def upsert_work(conn: sqlite3.Connection, record: WorkRecord) -> str:
+def upsert_work(conn: sqlite3.Connection, record: WorkRecord) -> int:
     """Insert or update a work and its references, then return its internal ID.
 
     Records sharing an identifier are merged. Other versions of the same paper
@@ -169,8 +171,7 @@ def upsert_work(conn: sqlite3.Connection, record: WorkRecord) -> str:
         for other in matches[1:]:
             merge_works(conn, work_id, other, rule="shared-id", confidence=1.0)
     else:
-        work_id = new_work_id()
-        conn.execute("INSERT INTO work(id, level) VALUES (?, 'stub')", (work_id,))
+        work_id = conn.execute("INSERT INTO work(level) VALUES ('stub')").lastrowid
 
     conn.execute(
         """
@@ -224,7 +225,7 @@ def _is_preprint(record: WorkRecord) -> bool:
     return record.type == "preprint" or record.venue_type == "repository"
 
 
-def _reconcile_versions(conn: sqlite3.Connection, work_id: str) -> str:
+def _reconcile_versions(conn: sqlite3.Connection, work_id: int) -> int:
     """Merge other versions of this paper, and link journal extensions."""
     row = conn.execute("SELECT * FROM work WHERE id = ?", (work_id,)).fetchone()
     if not row["title_key"]:

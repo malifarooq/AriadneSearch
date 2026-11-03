@@ -377,7 +377,7 @@ function renderFrontier(total, matching) {
 
 function markSelectedRow() {
   for (const row of document.querySelectorAll(".paper-row")) {
-    row.setAttribute("aria-current", row.dataset.id === state.selectedId ? "true" : "false");
+    row.setAttribute("aria-current", Number(row.dataset.id) === state.selectedId ? "true" : "false");
   }
 }
 

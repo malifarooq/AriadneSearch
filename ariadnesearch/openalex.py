@@ -110,8 +110,10 @@ class OpenAlexClient:
     ) -> dict | None:
         """GET with cache and backoff. Return None on 404.
 
-        Responses are stored without the API key. Spending is added to `budget`,
-        and calls stop once the daily limit is reached.
+        Responses are stored without the API key, in cache.db. A request made
+        with `read_cache=False`, such as a page of citing papers, is not stored
+        either, since it would never be read. Spending is added to `budget`, and
+        calls stop once the daily limit is reached.
         """
         params = dict(params or {})
         url = f"{path}?{urlencode(sorted(params.items()))}"
@@ -137,7 +139,10 @@ class OpenAlexClient:
         body = response.json()
         cost = (body.get("meta") or {}).get("cost_usd") or 0.0
         add_usage(self.conn, "openalex", 1, float(cost))
-        self._write_cache(key, url, body)
+        if read_cache:
+            self._write_cache(key, url, body)
+        else:
+            self.conn.commit()
         return body
 
     def _send(self, path: str, params: dict) -> httpx.Response:
@@ -181,7 +186,7 @@ class OpenAlexClient:
 
     def _read_cache(self, key: str) -> dict | None:
         row = self.conn.execute(
-            "SELECT body, fetched_at FROM raw_response WHERE key = ?", (key,)
+            "SELECT body, fetched_at FROM cache.raw_response WHERE key = ?", (key,)
         ).fetchone()
         if row is None:
             return None
@@ -192,7 +197,7 @@ class OpenAlexClient:
 
     def _write_cache(self, key: str, url: str, body: dict) -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO raw_response(key, url, body, fetched_at) "
+            "INSERT OR REPLACE INTO cache.raw_response(key, url, body, fetched_at) "
             "VALUES (?, ?, ?, ?)",
             (key, url, zlib.compress(json.dumps(body).encode()), utc_now()),
         )

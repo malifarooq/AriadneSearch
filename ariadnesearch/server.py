@@ -64,12 +64,12 @@ class ExpandRequest(BaseModel):
 
 
 class DecisionRequest(BaseModel):
-    work_id: str
+    work_id: int
     decision: Literal["accepted", "rejected", "read"]
 
 
 class Position(BaseModel):
-    id: str
+    id: int
     x: float
     y: float
 
@@ -153,7 +153,7 @@ def _require_project(conn: sqlite3.Connection, project_id: int) -> None:
         raise NotFound(f"No project with ID {project_id}.")
 
 
-def _doi(conn: sqlite3.Connection, work_id: str) -> str | None:
+def _doi(conn: sqlite3.Connection, work_id: int) -> str | None:
     return views.work_summaries(conn, [work_id]).get(work_id, {}).get("doi")
 
 
@@ -401,7 +401,7 @@ def export_bib(
 @app.get("/api/projects/{project_id}/works/{work_id}")
 def work(
     project_id: int,
-    work_id: str,
+    work_id: int,
     conn: sqlite3.Connection = Depends(get_conn),
     ieee: IEEEClient = Depends(get_ieee),
 ) -> dict:
@@ -418,7 +418,7 @@ def work(
 
 @app.post("/api/works/{work_id}/ieee")
 def ieee_details(
-    work_id: str,
+    work_id: int,
     conn: sqlite3.Connection = Depends(get_conn),
     ieee: IEEEClient = Depends(get_ieee),
 ) -> dict:

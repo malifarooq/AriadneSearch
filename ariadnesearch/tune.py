@@ -20,6 +20,7 @@ from ariadnesearch.db import create_project, delete_project, log_event, utc_now
 from ariadnesearch.errors import BadInput
 from ariadnesearch.expand import add_work_ids_as_seeds, expand_project
 from ariadnesearch.openalex import OpenAlexClient
+from ariadnesearch.prune import prune
 from ariadnesearch.rank import (
     KNOWN_STATES,
     RECENT_DAMPING,
@@ -170,6 +171,7 @@ def tune_project(
             f"has {len(papers)}. It keeps the default weights."
         )
     result = sweep(conn, client, papers, splits, k, progress=progress)
+    prune(conn)  # the splits' graphs are no longer needed
     best, recall = result.best()
     row = conn.execute("SELECT weights_json FROM project WHERE id = ?", (project_id,)).fetchone()
     weights = {**json.loads(row["weights_json"] or "{}"), **best}

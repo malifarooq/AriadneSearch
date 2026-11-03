@@ -1,10 +1,12 @@
--- Main database: data/graph.db
--- IEEE content is stored separately in data/ieee.db. See ieee.py.
+-- Main database: data/graph.db, layout version 2 (PRAGMA user_version).
+-- Cached API responses live in data/cache.db and IEEE content in data/ieee.db.
+-- db.init_db upgrades a version 1 database, keeping the old file as a backup.
 
 -- Papers. `id` is internal and never an OpenAlex ID, because versions of one
--- document can appear there as separate records.
+-- document can appear there as separate records. Most rows are placeholders
+-- ('stub'): papers known only because a stored paper cites them.
 CREATE TABLE IF NOT EXISTS work (
-    id          TEXT PRIMARY KEY,
+    id          INTEGER PRIMARY KEY,
     title       TEXT,
     title_key   TEXT,     -- normalized title, used to find other versions
     authors     TEXT,     -- JSON list of names
@@ -30,16 +32,16 @@ CREATE INDEX IF NOT EXISTS idx_work_title_key ON work(title_key);
 CREATE TABLE IF NOT EXISTS work_alias (
     scheme  TEXT NOT NULL,  -- doi, openalex, arxiv, ieee
     value   TEXT NOT NULL,
-    work_id TEXT NOT NULL REFERENCES work(id),
+    work_id INTEGER NOT NULL REFERENCES work(id),
     PRIMARY KEY (scheme, value)
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_alias_work ON work_alias(work_id);
 
 -- Merges are reversible: snapshot_json holds what undo_merge needs to restore.
 CREATE TABLE IF NOT EXISTS merge_log (
     id            INTEGER PRIMARY KEY,
-    keep_id       TEXT NOT NULL,
-    drop_id       TEXT NOT NULL,
+    keep_id       INTEGER NOT NULL,
+    drop_id       INTEGER NOT NULL,
     rule          TEXT NOT NULL,
     confidence    REAL NOT NULL,
     snapshot_json TEXT NOT NULL,
@@ -47,24 +49,24 @@ CREATE TABLE IF NOT EXISTS merge_log (
     undone_at     TEXT
 );
 
--- Citation edges: src cites dst.
+-- Citation edges: src cites dst. Most of the database, so kept lean: no row
+-- ID, and `source` only for edges from outside OpenAlex (arxiv or file).
 CREATE TABLE IF NOT EXISTS cites (
-    src        TEXT NOT NULL REFERENCES work(id),
-    dst        TEXT NOT NULL REFERENCES work(id),
-    sources    TEXT NOT NULL DEFAULT 'openalex',
-    first_seen TEXT NOT NULL,
+    src    INTEGER NOT NULL REFERENCES work(id),
+    dst    INTEGER NOT NULL REFERENCES work(id),
+    source TEXT,
     PRIMARY KEY (src, dst)
-);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_cites_dst ON cites(dst);
 
 -- Links between separate documents, such as a journal extension of a
 -- conference paper.
 CREATE TABLE IF NOT EXISTS relation (
-    a    TEXT NOT NULL REFERENCES work(id),
-    b    TEXT NOT NULL REFERENCES work(id),
+    a    INTEGER NOT NULL REFERENCES work(id),
+    b    INTEGER NOT NULL REFERENCES work(id),
     kind TEXT NOT NULL,
     PRIMARY KEY (a, b, kind)
-);
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS project (
     id           INTEGER PRIMARY KEY,
@@ -75,7 +77,7 @@ CREATE TABLE IF NOT EXISTS project (
 -- Triage state is per project: a paper can matter to one topic and not another.
 CREATE TABLE IF NOT EXISTS membership (
     project_id INTEGER NOT NULL REFERENCES project(id),
-    work_id    TEXT NOT NULL REFERENCES work(id),
+    work_id    INTEGER NOT NULL REFERENCES work(id),
     state      TEXT NOT NULL
                CHECK (state IN ('seed', 'frontier', 'accepted', 'rejected', 'read')),
     x          REAL,
@@ -84,6 +86,7 @@ CREATE TABLE IF NOT EXISTS membership (
     PRIMARY KEY (project_id, work_id)
 );
 CREATE INDEX IF NOT EXISTS idx_membership_state ON membership(project_id, state);
+CREATE INDEX IF NOT EXISTS idx_membership_work ON membership(work_id);
 
 -- Append-only history of decisions and expansions.
 CREATE TABLE IF NOT EXISTS event (
@@ -97,14 +100,14 @@ CREATE TABLE IF NOT EXISTS event (
 -- Known papers whose best neighbours have been added. See expand._populate.
 CREATE TABLE IF NOT EXISTS populated (
     project_id INTEGER NOT NULL REFERENCES project(id),
-    work_id    TEXT NOT NULL REFERENCES work(id),
+    work_id    INTEGER NOT NULL REFERENCES work(id),
     at         TEXT NOT NULL,
     PRIMARY KEY (project_id, work_id)
 );
 
 -- Reference lists filled in from outside OpenAlex. See references.py.
 CREATE TABLE IF NOT EXISTS ref_import (
-    work_id TEXT PRIMARY KEY REFERENCES work(id),
+    work_id INTEGER PRIMARY KEY REFERENCES work(id),
     source  TEXT NOT NULL,     -- arxiv or file
     found   INTEGER NOT NULL,  -- references stored, 0 when nothing was found
     at      TEXT NOT NULL
@@ -112,7 +115,7 @@ CREATE TABLE IF NOT EXISTS ref_import (
 
 -- How far each paper has been fetched.
 CREATE TABLE IF NOT EXISTS fetch_state (
-    work_id       TEXT PRIMARY KEY REFERENCES work(id),
+    work_id       INTEGER PRIMARY KEY REFERENCES work(id),
     citers_total  INTEGER,
     refs_at       TEXT,
     citers_at     TEXT
@@ -127,15 +130,6 @@ CREATE TABLE IF NOT EXISTS budget (
     PRIMARY KEY (source, day)
 );
 
--- OpenAlex responses, so tables can be rebuilt when merge logic changes.
--- Strip the API key from `url` before storing it. Never store IEEE responses here.
-CREATE TABLE IF NOT EXISTS raw_response (
-    key        TEXT PRIMARY KEY,
-    url        TEXT NOT NULL,
-    body       BLOB NOT NULL,  -- zlib-compressed JSON
-    fetched_at TEXT NOT NULL
-);
-
 -- Your own papers and what they cite.
 CREATE TABLE IF NOT EXISTS my_paper (
     id     INTEGER PRIMARY KEY,
@@ -147,7 +141,7 @@ CREATE TABLE IF NOT EXISTS my_paper (
 
 CREATE TABLE IF NOT EXISTS my_citation (
     my_paper_id INTEGER NOT NULL REFERENCES my_paper(id),
-    work_id     TEXT NOT NULL REFERENCES work(id),
+    work_id     INTEGER NOT NULL REFERENCES work(id),
     source      TEXT NOT NULL CHECK (source IN ('openalex', 'aux', 'manual')),
     PRIMARY KEY (my_paper_id, work_id, source)
 );
@@ -155,7 +149,7 @@ CREATE INDEX IF NOT EXISTS idx_my_citation_work ON my_citation(work_id);
 
 -- Saved in your library. This does not mean cited.
 CREATE TABLE IF NOT EXISTS library_item (
-    work_id  TEXT NOT NULL REFERENCES work(id),
+    work_id  INTEGER NOT NULL REFERENCES work(id),
     source   TEXT NOT NULL,
     added_at TEXT NOT NULL,
     PRIMARY KEY (work_id, source)

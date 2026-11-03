@@ -31,7 +31,7 @@ ariadne = "ariadnesearch.cli:main"
 packages = ["ariadnesearch"]
 
 [tool.setuptools.package-data]
-ariadnesearch = ["schema.sql"]
+ariadnesearch = ["schema.sql", "cache_schema.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

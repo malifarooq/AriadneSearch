@@ -132,7 +132,7 @@ def fetch_arxiv_source(
 def attach_references(
     conn: sqlite3.Connection,
     client: OpenAlexClient,
-    work_id: str,
+    work_id: int,
     entries: list[BibEntry],
     source: str,
 ) -> tuple[int, list[str]]:
@@ -141,8 +141,8 @@ def attach_references(
     targets = sorted(set(found.values()) - {work_id})
     now = utc_now()
     conn.executemany(
-        "INSERT OR IGNORE INTO cites(src, dst, sources, first_seen) VALUES (?, ?, ?, ?)",
-        [(work_id, target, source, now) for target in targets],
+        "INSERT OR IGNORE INTO cites(src, dst, source) VALUES (?, ?, ?)",
+        [(work_id, target, source) for target in targets],
     )
     conn.execute(
         "UPDATE work SET n_refs = MAX(COALESCE(n_refs, 0), ?) WHERE id = ?",

@@ -63,8 +63,8 @@ def test_attach_references_links_the_paper(conn, client, project):
     stored, unresolved = attach_references(conn, client, paper, entries, "file")
     assert stored == 3 and unresolved == []
     target = resolve(conn, "doi", "10.1000/cocited.30")
-    row = conn.execute("SELECT sources FROM cites WHERE src = ? AND dst = ?", (paper, target)).fetchone()
-    assert row["sources"] == "file"
+    row = conn.execute("SELECT source FROM cites WHERE src = ? AND dst = ?", (paper, target)).fetchone()
+    assert row["source"] == "file"
 
 
 def test_update_graph_fills_a_missing_reference_list_from_arxiv(conn, project, monkeypatch):
